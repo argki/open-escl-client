@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -32,7 +32,8 @@ def run_gui_app(argv: list[str] | None = None) -> int:
     app.setApplicationName("Open eSCL Client")
     app.setOrganizationName("open-escl-client")
 
-    engine, _vm = create_qml_engine()
+    engine, vm = create_qml_engine()
     if not engine.rootObjects():
         return 1
+    QTimer.singleShot(150, vm.refreshScanners)
     return app.exec()

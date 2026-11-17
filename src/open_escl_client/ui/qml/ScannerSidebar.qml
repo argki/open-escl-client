@@ -8,11 +8,16 @@ import QtQuick.Layouts
 // セクション構成:
 //   1. スキャナ選択セクション（mDNS自動検索・IP/URL直接指定）
 //   2. 読み取り設定セクション（給紙元［原稿台/ADF］・用紙サイズ・解像度DPI）
+//      ※ 用紙サイズにマウスポインタをかざすと「原稿台への置き方イメージ図」を表示
 //   3. 保存設定セクション（保存先フォルダ・ネーミングルール・ファイル形式）
 // ============================================================================
 Rectangle {
     id: sidebarRoot
     color: "#FFFFFF"
+
+    // ドロップダウン項目やコンボボックス上でホバー中の用紙サイズラベル
+    property string hoveredPaperLabel: ""
+    readonly property bool showPlacementGuide: paperSizeCombo.hovered || hoveredPaperLabel.length > 0
 
     ScrollView {
         anchors.fill: parent
@@ -135,7 +140,7 @@ Rectangle {
                     }
 
                     Label {
-                        text: "用紙サイズ（スキャナ対応サイズ自動判定）"
+                        text: "用紙サイズ・向き（マウスをかざすと配置図を表示）"
                         font.bold: true
                         color: "#374151"
                     }
@@ -143,6 +148,7 @@ Rectangle {
                     ComboBox {
                         id: paperSizeCombo
                         objectName: "paperSizeCombo"
+                        hoverEnabled: true
                         Layout.fillWidth: true
                         model: viewModel ? viewModel.paperSizes : []
                         currentIndex: {
@@ -153,6 +159,24 @@ Rectangle {
                         onActivated: function(index) {
                             if (viewModel && model[index]) {
                                 viewModel.selectedPaperSize = model[index]
+                            }
+                        }
+                        popup.onClosed: {
+                            sidebarRoot.hoveredPaperLabel = ""
+                        }
+
+                        // ドロップダウン内の各選択肢にマウスポインタをかざした際にも配置図をリアルタイム更新
+                        delegate: ItemDelegate {
+                            width: paperSizeCombo.width
+                            text: modelData
+                            highlighted: paperSizeCombo.highlightedIndex === index
+                            hoverEnabled: true
+                            onHoveredChanged: {
+                                if (hovered) {
+                                    sidebarRoot.hoveredPaperLabel = modelData
+                                } else if (sidebarRoot.hoveredPaperLabel === modelData) {
+                                    sidebarRoot.hoveredPaperLabel = ""
+                                }
                             }
                         }
                     }
@@ -254,6 +278,35 @@ Rectangle {
             }
 
             Item { Layout.fillHeight: true }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // ホバー時にサイドバー右隣へ表示される「原稿台への置き方イメージ図」ポップアップ
+    // ------------------------------------------------------------------------
+    Popup {
+        id: placementGuidePopup
+        objectName: "placementGuidePopup"
+        parent: sidebarRoot
+        x: sidebarRoot.width + 12
+        y: Math.max(16, paperSizeCombo.mapToItem(sidebarRoot, 0, 0).y - 20)
+        padding: 0
+        modal: false
+        focus: false
+        closePolicy: Popup.NoAutoClose
+        visible: sidebarRoot.showPlacementGuide
+
+        background: Item {}
+
+        contentItem: PaperPlacementPreview {
+            id: placementPreviewCard
+            guideData: {
+                if (!viewModel) return ({})
+                var targetLabel = sidebarRoot.hoveredPaperLabel.length > 0
+                                  ? sidebarRoot.hoveredPaperLabel
+                                  : viewModel.selectedPaperSize
+                return viewModel.getPlacementGuide(targetLabel)
+            }
         }
     }
 }

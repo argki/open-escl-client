@@ -12,7 +12,7 @@ from PySide6.QtGui import QGuiApplication
 
 from open_escl_client.escl.capabilities import parse_scanner_capabilities_xml
 from open_escl_client.escl.discovery import DiscoveredScanner
-from open_escl_client.ui.app import MAIN_QML_PATH, create_qml_engine
+from open_escl_client.ui.app import MAIN_QML_PATH, QML_DIR, create_qml_engine
 from open_escl_client.ui.viewmodel import AppViewModel
 from tests.escl.test_capabilities import BROTHER_CAPABILITIES_XML, GENERIC_A3_PROFILE_REF_XML
 
@@ -24,8 +24,9 @@ def _ensure_qapp() -> QGuiApplication:
     return app  # type: ignore[return-value]
 
 
-def test_main_qml_file_exists() -> None:
+def test_main_qml_and_placement_preview_files_exist() -> None:
     assert MAIN_QML_PATH.is_file()
+    assert (QML_DIR / "PaperPlacementPreview.qml").is_file()
 
 
 def test_qml_engine_loads_main_window_and_components() -> None:
@@ -52,11 +53,41 @@ def test_qml_engine_loads_main_window_and_components() -> None:
     assert root.findChild(QObject, "actionToolbar") is not None
     assert root.findChild(QObject, "previewButton") is not None
     assert root.findChild(QObject, "scanAndSaveButton") is not None
+    assert root.findChild(QObject, "placementGuidePopup") is not None
+    assert root.findChild(QObject, "paperPlacementPreview") is not None
+    assert root.findChild(QObject, "scannerBedRect") is not None
+    assert root.findChild(QObject, "paperSheetRect") is not None
 
     for obj in roots:
         obj.deleteLater()
     engine.deleteLater()
     assert vm is not None
+
+
+def test_hover_placement_guide_updates_preview_card() -> None:
+    _ensure_qapp()
+    a3_caps = parse_scanner_capabilities_xml(GENERIC_A3_PROFILE_REF_XML)
+    mock_fetcher = MagicMock(return_value=a3_caps)
+    vm = AppViewModel(capabilities_fetcher=mock_fetcher)
+    vm.addManualScanner("192.168.1.60")
+
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+    preview_card = root.findChild(QObject, "paperPlacementPreview")
+    assert preview_card is not None
+
+    # Default selected is A4 Portrait
+    assert preview_card.property("orientation") == "portrait"
+
+    # Selecting A4 Landscape updates the placement diagram to landscape
+    vm.selectedPaperSize = "A4 横置き (297 × 210 mm)"
+    assert preview_card.property("orientation") == "landscape"
+    assert preview_card.property("paperW") == 297.0
+    assert preview_card.property("paperH") == 210.0
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
 
 
 def test_viewmodel_properties_and_slots() -> None:
