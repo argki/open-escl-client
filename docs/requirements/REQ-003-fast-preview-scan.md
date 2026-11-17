@@ -122,24 +122,29 @@ feat(ui): QMLプレビューキャンバスへのスキャン画像表示と進�
 
 ---
 
-### タスク 4: 原稿台の置き方（縦置き/横置き）とスキャン画像の向き・読み取り領域を一致させる回転・座標補正の実装
+### タスク 4: ScanRegion が無視され見切れる問題の修正および原稿台の置き方とスキャン画像の向きを一致させる回転・座標補正の実装
 
 - **状態**: `[ ] 未完了`
 - **実装内容**:
-  - Brother MFC-J6580CDW 等のフラットベッド原稿台では、eSCL の主走査軸（画像のX軸：左→右）が物理的な「奥行き方向（奥→手前）」、副走査軸（画像のY軸：上→下）が物理的な「横方向（左→右）」に対応しているため、正面から見て置いた原稿の生スキャン画像は90度傾いた向きになる。また、横方向の読み取り幅と奥行き方向の読み取り長の指定が切れないよう eSCL `ScanRegion` と取得後の画像回転・トリミング正規化を `PreviewScanService` に実装する
-  - あわせて、原稿の上下・左右の向きをプレビュー上でワンクリックで調整できるよう、90度回転（左回転・右回転）操作を `AppViewModel` および `PreviewArea.qml` に追加する
+  - **用紙サイズや「最大サイズ」に変えても同じサイズ（`1680×2195 px`）になり見切れていた問題の修正**:
+    - PWG / eSCL の XML スキーマ（`xs:sequence`）では `<pwg:ScanRegion>` 内の要素順序が `<pwg:ContentRegionUnits>` → `<pwg:Height>` → `<pwg:Width>` → `<pwg:XOffset>` → `<pwg:YOffset>` と定義されているが、従来は `XOffset` / `YOffset` を先に配置し `pwg:MustHonor` 属性を付与していたため、Brother MFC-J6580CDW の XML パーサが `ScanRegion` のサイズ指定を無視してデフォルトサイズ（`1680×2195 px`）にフォールバックしていた問題を修正する
+    - スキャナが報告する `ScannerCapabilities` の `<pwg:Version>` やスキーマ順序に厳密に準拠した `ScanSettings` XML を生成するよう `build_scan_settings_xml` を修正する
+  - **原稿台の置き方（縦置き/横置き/最大サイズ）とプレビュー画像の向きの整合**:
+    - フラットベッド原稿台では eSCL の主走査軸（画像のX軸）が物理的な「奥行き方向（奥→手前）」、副走査軸（画像のY軸）が物理的な「横方向（左→右）」に対応しているため、正面から見て置いた原稿の向きおよび選択した用紙サイズ（縦置き・横置き・最大サイズ）に合わせて画像を自動回転・領域正規化する処理を `PreviewScanService` に実装する
+  - あわせて、プレビュー画面上でワンクリックで90度単位の回転調整（左90°回転・右90°回転）を行える機能を `AppViewModel` および `PreviewArea.qml` に追加する
 - **提案コミットメッセージ**:
 
 ```text
-fix(scan,ui): 原稿台の置き方とプレビュー画像の向き・読み取り領域を一致させる回転・座標補正を実装
+fix(escl,scan,ui): ScanRegionが無視され見切れる不具合を修正し原稿台の置き方とプレビュー画像の向きを整合
 
 ## 背景・目的
-Brother MFC-J6580CDW実機において「A4 縦置き」のイメージ通りに原稿をセットして高速プレビューを実行した際、スキャナの主走査（奥→手前＝画像X軸）・副走査（左→右＝画像Y軸）の物理構造によりプレビュー結果が90度傾き、かつ一部領域が切れて表示される問題を解消するため（REQ-003 タスク4）。
+Brother MFC-J6580CDW実機において、用紙サイズや向きを「A4 縦置き」や「最大サイズ」に変更しても常に同じデフォルトサイズ（1680×2195 px）でスキャンされて端が見切れ、かつスキャナの主走査・副走査の物理構造により画像が90度傾いて表示される問題を解消するため（REQ-003 タスク4）。
 
 ## 変更内容
-- `src/open_escl_client/core/preview_service.py` を更新し、原稿台（Platen）でのスキャン時に原稿が欠けない読み取り領域（ScanRegion）の送信と、正面から見た置き方（縦置き/横置き）に合わせた画像の自動回転・領域切り出し正規化処理を実装
+- `src/open_escl_client/escl/scan_client.py` の `build_scan_settings_xml` を修正し、Brother等のeSCLパーサが `ScanRegion` を無視しないようPWG XMLスキーマ順（`ContentRegionUnits` → `Height` → `Width` → `XOffset` → `YOffset`）に準拠させ、余分な属性を除去
+- `src/open_escl_client/core/preview_service.py` を更新し、原稿台（Platen）でのスキャン結果を選択された用紙サイズ・向き（縦置き / 横置き / 最大サイズ）に合わせて正しい向きへ自動回転・領域正規化する処理を実装
 - `src/open_escl_client/ui/viewmodel.py` および `src/open_escl_client/ui/qml/PreviewArea.qml` に、プレビュー画像を90度単位で左右に回転できる機能（`rotatePreviewLeft` / `rotatePreviewRight`）を追加
-- `tests/core/test_preview_service.py` および `tests/ui/test_qml_load.py` に原稿台の向き正規化および回転操作の単体テストを追加し、`REQ-003` を完了に更新
+- `tests/escl/test_scan_client.py`, `tests/core/test_preview_service.py`, `tests/ui/test_qml_load.py` に単体テストを追加し、`REQ-003` を完了に更新
 
 ## 影響範囲・備考
 - 対象機器: Brother MFC-J6580CDW等のeSCL対応フラットベッドスキャナ全般
