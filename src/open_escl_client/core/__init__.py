@@ -7,6 +7,11 @@ from open_escl_client.core.paper_size import (
     PaperSizeOption,
     PaperSizeResolver,
 )
+from open_escl_client.core.preview_service import (
+    PreviewScanService,
+    PreviewSession,
+    select_preview_dpi,
+)
 
 __all__ = [
     "STANDARD_PAPER_SIZES",
@@ -14,4 +19,7 @@ __all__ = [
     "PaperPlacementGuide",
     "PaperSizeOption",
     "PaperSizeResolver",
+    "PreviewScanService",
+    "PreviewSession",
+    "select_preview_dpi",
 ]
