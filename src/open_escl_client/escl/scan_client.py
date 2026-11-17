@@ -12,7 +12,7 @@ from open_escl_client.escl.capabilities import InputSourceKind
 
 PWG_NS = "http://www.pwg.org/schemas/2010/12/sm"
 SCAN_NS = "http://schemas.hp.com/imaging/escl/2011/05/03"
-NSMAP = {"pwg": PWG_NS, "scan": SCAN_NS}
+NSMAP = {"scan": SCAN_NS, "pwg": PWG_NS}
 
 
 class EsclScanError(RuntimeError):
@@ -45,7 +45,12 @@ class EsclScanResult:
 
 
 def build_scan_settings_xml(request: EsclScanRequest) -> bytes:
-    """Build an eSCL-compliant `scan:ScanSettings` XML payload."""
+    """Build a compact single-line eSCL `scan:ScanSettings` XML payload.
+
+    Brother and other embedded eSCL firmware XML parsers can ignore region/resolution tags when
+    pretty-printed indentation/newlines or incompatible element ordering are present. This builder
+    emits a compact single-line XML matching the standard eSCL client structure.
+    """
     root = etree.Element(f"{{{SCAN_NS}}}ScanSettings", nsmap=NSMAP)
 
     ver_elem = etree.SubElement(root, f"{{{PWG_NS}}}Version")
@@ -54,18 +59,12 @@ def build_scan_settings_xml(request: EsclScanRequest) -> bytes:
     regions_elem = etree.SubElement(
         root,
         f"{{{PWG_NS}}}ScanRegions",
-        attrib={f"{{{PWG_NS}}}MustHonor": "true"},
+        attrib={f"{{{PWG_NS}}}MustHonor": "false"},
     )
     region_elem = etree.SubElement(regions_elem, f"{{{PWG_NS}}}ScanRegion")
 
     units_elem = etree.SubElement(region_elem, f"{{{PWG_NS}}}ContentRegionUnits")
     units_elem.text = "escl:ThreeHundredthsOfInches"
-
-    x_off_elem = etree.SubElement(region_elem, f"{{{PWG_NS}}}XOffset")
-    x_off_elem.text = str(max(0, int(request.x_offset_units)))
-
-    y_off_elem = etree.SubElement(region_elem, f"{{{PWG_NS}}}YOffset")
-    y_off_elem.text = str(max(0, int(request.y_offset_units)))
 
     width_elem = etree.SubElement(region_elem, f"{{{PWG_NS}}}Width")
     width_elem.text = str(max(1, int(request.width_units)))
@@ -73,19 +72,23 @@ def build_scan_settings_xml(request: EsclScanRequest) -> bytes:
     height_elem = etree.SubElement(region_elem, f"{{{PWG_NS}}}Height")
     height_elem.text = str(max(1, int(request.height_units)))
 
+    x_off_elem = etree.SubElement(region_elem, f"{{{PWG_NS}}}XOffset")
+    x_off_elem.text = str(max(0, int(request.x_offset_units)))
+
+    y_off_elem = etree.SubElement(region_elem, f"{{{PWG_NS}}}YOffset")
+    y_off_elem.text = str(max(0, int(request.y_offset_units)))
+
+    format_elem = etree.SubElement(root, f"{{{PWG_NS}}}DocumentFormat")
+    format_elem.text = request.document_format
+
     input_src_elem = etree.SubElement(root, f"{{{PWG_NS}}}InputSource")
     if request.input_source == InputSourceKind.PLATEN:
         input_src_elem.text = "Platen"
     else:
         input_src_elem.text = "Feeder"
-        duplex_elem = etree.SubElement(root, f"{{{SCAN_NS}}}Duplex")
-        duplex_elem.text = "true" if request.input_source == InputSourceKind.ADF_DUPLEX else "false"
 
     color_elem = etree.SubElement(root, f"{{{SCAN_NS}}}ColorMode")
     color_elem.text = request.color_mode
-
-    format_elem = etree.SubElement(root, f"{{{PWG_NS}}}DocumentFormat")
-    format_elem.text = request.document_format
 
     x_res_elem = etree.SubElement(root, f"{{{SCAN_NS}}}XResolution")
     x_res_elem.text = str(int(request.resolution_dpi))
@@ -93,7 +96,12 @@ def build_scan_settings_xml(request: EsclScanRequest) -> bytes:
     y_res_elem = etree.SubElement(root, f"{{{SCAN_NS}}}YResolution")
     y_res_elem.text = str(int(request.resolution_dpi))
 
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
+    if request.input_source != InputSourceKind.PLATEN:
+        duplex_elem = etree.SubElement(root, f"{{{SCAN_NS}}}Duplex")
+        duplex_elem.text = "true" if request.input_source == InputSourceKind.ADF_DUPLEX else "false"
+
+    body = etree.tostring(root, xml_declaration=False, encoding="UTF-8", pretty_print=False)
+    return b'<?xml version="1.0" encoding="UTF-8"?>' + body
 
 
 def resolve_job_url(base_url: str, location_header: str) -> str:

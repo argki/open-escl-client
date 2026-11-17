@@ -30,11 +30,21 @@ def test_build_scan_settings_xml_platen_and_adf_duplex() -> None:
     xml_text = xml_bytes.decode("utf-8")
 
     assert root.tag.endswith("ScanSettings")
-    assert "<pwg:Width>2480</pwg:Width>" in xml_text
-    assert "<pwg:Height>3508</pwg:Height>" in xml_text
-    assert "<pwg:InputSource>Platen</pwg:InputSource>" in xml_text
-    assert "<scan:XResolution>100</scan:XResolution>" in xml_text
-    assert "<scan:YResolution>100</scan:YResolution>" in xml_text
+    # Compact single-line XML without pretty-print newlines (required for Brother eSCL parser)
+    assert "\n" not in xml_text
+    assert xml_text.startswith('<?xml version="1.0" encoding="UTF-8"?><scan:ScanSettings ')
+    assert '<pwg:ScanRegions pwg:MustHonor="false">' in xml_text
+    assert (
+        "<pwg:ScanRegion>"
+        "<pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>"
+        "<pwg:Width>2480</pwg:Width>"
+        "<pwg:Height>3508</pwg:Height>"
+        "<pwg:XOffset>0</pwg:XOffset>"
+        "<pwg:YOffset>0</pwg:YOffset>"
+        "</pwg:ScanRegion>"
+    ) in xml_text
+    assert "<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat><pwg:InputSource>Platen</pwg:InputSource>" in xml_text
+    assert "<scan:ColorMode>RGB24</scan:ColorMode><scan:XResolution>100</scan:XResolution><scan:YResolution>100</scan:YResolution>" in xml_text
     assert "Duplex" not in xml_text
 
     req_duplex = EsclScanRequest(
