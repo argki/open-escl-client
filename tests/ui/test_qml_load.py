@@ -1,17 +1,21 @@
-"""Tests for declarative QML loading and AppViewModel bindings."""
+"""Tests for declarative QML loading, AppViewModel bindings, and fast preview canvas rendering."""
 
 from __future__ import annotations
 
+from io import BytesIO
 import os
 from unittest.mock import MagicMock
+from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QGuiApplication
 
+from open_escl_client.core.preview_service import PreviewScanService
 from open_escl_client.escl.capabilities import parse_scanner_capabilities_xml
 from open_escl_client.escl.discovery import DiscoveredScanner
+from open_escl_client.escl.scan_client import EsclScanRequest, EsclScanResult
 from open_escl_client.ui.app import MAIN_QML_PATH, QML_DIR, create_qml_engine
 from open_escl_client.ui.viewmodel import AppViewModel
 from tests.escl.test_capabilities import BROTHER_CAPABILITIES_XML, GENERIC_A3_PROFILE_REF_XML
@@ -22,6 +26,13 @@ def _ensure_qapp() -> QGuiApplication:
     if app is None:
         app = QGuiApplication([])
     return app  # type: ignore[return-value]
+
+
+def _make_jpeg_bytes(width: int = 400, height: int = 300) -> bytes:
+    buf = BytesIO()
+    img = Image.new("RGB", (width, height), color=(200, 220, 240))
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 def test_main_qml_and_placement_preview_files_exist() -> None:
@@ -50,8 +61,11 @@ def test_qml_engine_loads_main_window_and_components() -> None:
     assert root.findChild(QObject, "namingRuleField") is not None
     assert root.findChild(QObject, "saveFormatCombo") is not None
     assert root.findChild(QObject, "previewArea") is not None
+    assert root.findChild(QObject, "previewCanvasImage") is not None
+    assert root.findChild(QObject, "busyOverlay") is not None
     assert root.findChild(QObject, "actionToolbar") is not None
     assert root.findChild(QObject, "previewButton") is not None
+    assert root.findChild(QObject, "cancelScanButton") is not None
     assert root.findChild(QObject, "scanAndSaveButton") is not None
     assert root.findChild(QObject, "placementGuidePopup") is not None
     assert root.findChild(QObject, "paperPlacementPreview") is not None
@@ -110,6 +124,65 @@ def test_hover_placement_guide_updates_preview_card_and_horizontal_platen_geomet
     engine.deleteLater()
 
 
+def test_fast_preview_scan_updates_image_provider_and_qml_canvas() -> None:
+    _ensure_qapp()
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+
+    sample_jpeg = _make_jpeg_bytes(595, 420)
+    mock_scan_client = MagicMock()
+
+    def _fake_scan(req: EsclScanRequest) -> EsclScanResult:
+        return EsclScanResult(
+            image_bytes=sample_jpeg,
+            content_type="image/jpeg",
+            job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+            request=req,
+        )
+
+    mock_scan_client.scan_single_page.side_effect = _fake_scan
+    preview_service = PreviewScanService(scan_client_factory=lambda _url: mock_scan_client)
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        preview_service=preview_service,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+
+    # Even when save resolution is 600 DPI, preview must execute at 100 DPI (fastest supported)
+    vm.selectedResolution = 600
+    assert vm.hasPreview is False
+
+    vm.requestPreview()
+
+    assert vm.hasPreview is True
+    assert vm.previewDpi == 100
+    assert vm.previewImageUrl == "image://preview/1"
+    assert "100 dpi" in vm.statusMessage
+    assert "595×420" in vm.statusMessage
+
+    # Verify zoom controls
+    vm.zoomInPreview()
+    assert vm.previewZoom == 1.25
+    vm.zoomOutPreview()
+    assert vm.previewZoom == 1.0
+    vm.zoomInPreview()
+    vm.resetPreviewZoom()
+    assert vm.previewZoom == 1.0
+
+    preview_img = root.findChild(QObject, "previewCanvasImage")
+    assert preview_img is not None
+    assert preview_img.property("source").toString() == "image://preview/1"
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
 def test_viewmodel_properties_and_slots() -> None:
     vm = AppViewModel()
     assert "A4 横置き (横 297 × 奥行き 210 mm)" in vm.paperSizes
@@ -133,9 +206,6 @@ def test_viewmodel_properties_and_slots() -> None:
 
     vm.namingRule = "Receipt_{date}_{seq:04d}"
     assert vm.namingRule == "Receipt_{date}_{seq:04d}"
-
-    vm.requestPreview()
-    assert "プレビュー" in vm.statusMessage
 
     vm.requestScanAndSave()
     assert "600 dpi" in vm.statusMessage
