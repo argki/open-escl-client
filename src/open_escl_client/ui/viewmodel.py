@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
+from pathlib import Path
+import threading
 from urllib.parse import urlparse
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 
+from open_escl_client.config.user_config import (
+    UserConfig,
+    UserConfigStore,
+    normalize_save_format,
+)
+from open_escl_client.core.continuous_scan import (
+    ContinuousScanSession,
+    ContinuousScanStepResult,
+    ScanSaveProfile,
+)
+from open_escl_client.core.exporter import ImageExporter
+from open_escl_client.core.naming import FileNamingEngine
 from open_escl_client.core.paper_size import PaperSizeOption, PaperSizeResolver
 from open_escl_client.core.preview_service import (
     PreviewScanService,
@@ -21,6 +34,7 @@ from open_escl_client.escl.capabilities import (
     fetch_scanner_capabilities,
 )
 from open_escl_client.escl.discovery import DiscoveredScanner, EsclScannerDiscovery
+from open_escl_client.escl.scan_client import EsclScanClient
 from open_escl_client.ui.image_provider import PreviewImageProvider
 
 INPUT_SOURCE_LABELS: dict[InputSourceKind, str] = {
@@ -78,14 +92,20 @@ class AppViewModel(QObject):
     saveFormatChanged = Signal()
     saveDirectoryChanged = Signal()
     namingRuleChanged = Signal()
+    jpegQualityChanged = Signal()
+    multipagePdfChanged = Signal()
+    nextFilenamePreviewChanged = Signal()
+    scanSaveChanged = Signal()
     statusMessageChanged = Signal()
     isBusyChanged = Signal()
     previewChanged = Signal()
     previewZoomChanged = Signal()
 
-    # Internal thread-safe completion signals for background preview scan
+    # Internal thread-safe completion signals for background scan tasks
     _previewFinishedInternal = Signal(object)
     _previewFailedInternal = Signal(str)
+    _scanSaveFinishedInternal = Signal(object)
+    _scanSaveFailedInternal = Signal(str)
 
     def __init__(
         self,
@@ -95,18 +115,32 @@ class AppViewModel(QObject):
         capabilities_fetcher: Callable[[str], ScannerCapabilities] = fetch_scanner_capabilities,
         paper_size_resolver: PaperSizeResolver | None = None,
         preview_service: PreviewScanService | None = None,
+        scan_client_factory: Callable[[str], EsclScanClient] | None = None,
+        naming_engine: FileNamingEngine | None = None,
+        exporter: ImageExporter | None = None,
+        config_store: UserConfigStore | None = None,
         run_preview_async: bool = False,
     ) -> None:
         super().__init__(parent)
         self._discovery_service = discovery_service or EsclScannerDiscovery(timeout_seconds=1.2)
         self._capabilities_fetcher = capabilities_fetcher
         self._paper_size_resolver = paper_size_resolver or PaperSizeResolver()
-        self._preview_service = preview_service or PreviewScanService()
+        self._scan_client_factory = scan_client_factory or (lambda url: EsclScanClient(url))
+        self._preview_service = preview_service or PreviewScanService(
+            scan_client_factory=self._scan_client_factory
+        )
+        self._naming_engine = naming_engine or FileNamingEngine()
+        self._exporter = exporter or ImageExporter()
+        self._config_store = config_store
         self._run_preview_async = run_preview_async
         self._image_provider = PreviewImageProvider()
 
         self._previewFinishedInternal.connect(self._on_preview_finished)
         self._previewFailedInternal.connect(self._on_preview_failed)
+        self._scanSaveFinishedInternal.connect(self._on_scan_save_finished)
+        self._scanSaveFailedInternal.connect(self._on_scan_save_failed)
+
+        loaded_cfg = self._config_store.load() if self._config_store is not None else UserConfig()
 
         self._discovered_by_label: dict[str, DiscoveredScanner] = {}
         self._current_capabilities: ScannerCapabilities | None = None
@@ -132,12 +166,19 @@ class AppViewModel(QObject):
         self._selected_paper_size: str = a4_default
 
         self._resolutions: list[int] = list(DEFAULT_PLATEN_CAPS.resolutions)
-        self._selected_resolution: int = 300 if 300 in self._resolutions else self._resolutions[0]
+        self._selected_resolution: int = (
+            loaded_cfg.resolution_dpi
+            if loaded_cfg.resolution_dpi in self._resolutions
+            else (300 if 300 in self._resolutions else self._resolutions[0])
+        )
 
         self._save_formats: list[str] = ["PDF", "JPEG", "PNG"]
-        self._selected_save_format: str = "PDF"
-        self._save_directory: str = "~/Pictures/Scans"
-        self._naming_rule: str = "Scan_{date}_{seq:03d}"
+        self._selected_save_format: str = normalize_save_format(loaded_cfg.save_format)
+        self._save_directory: str = loaded_cfg.save_directory
+        self._naming_rule: str = loaded_cfg.naming_rule
+        self._jpeg_quality: int = loaded_cfg.jpeg_quality
+        self._multipage_pdf: bool = loaded_cfg.multipage_pdf
+
         self._status_message: str = "準備完了（Brother × macOS 優先モード）"
         self._is_busy: bool = False
         self._cancel_requested: bool = False
@@ -145,6 +186,13 @@ class AppViewModel(QObject):
         self._preview_session: PreviewSession | None = None
         self._preview_image_url: str = ""
         self._preview_zoom: float = 1.0
+
+        self._continuous_session: ContinuousScanSession | None = None
+        self._saved_file_count: int = 0
+        self._last_saved_file_name: str = ""
+        self._pending_pdf_page_count: int = 0
+        self._next_filename_preview: str = ""
+        self._refresh_next_filename_preview()
 
     @property
     def image_provider(self) -> PreviewImageProvider:
@@ -155,6 +203,43 @@ class AppViewModel(QObject):
     def preview_session(self) -> PreviewSession | None:
         """Return the latest `PreviewSession` if a preview has been captured."""
         return self._preview_session
+
+    def _persist_config(self) -> None:
+        if self._config_store is None:
+            return
+        scanner = self._discovered_by_label.get(self._selected_scanner)
+        cfg = UserConfig(
+            save_directory=self._save_directory,
+            naming_rule=self._naming_rule,
+            save_format=self._selected_save_format,
+            resolution_dpi=self._selected_resolution,
+            jpeg_quality=self._jpeg_quality,
+            multipage_pdf=self._multipage_pdf,
+            last_scanner_url=scanner.base_url if scanner is not None else "",
+        )
+        try:
+            self._config_store.save(cfg)
+        except OSError:
+            pass
+
+    def _refresh_next_filename_preview(self) -> None:
+        start_seq = self._continuous_session.next_seq if self._continuous_session is not None else 1
+        try:
+            preview = self._naming_engine.preview_next_filename(
+                Path(self._save_directory).expanduser(),
+                self._naming_rule,
+                file_format=self._selected_save_format,
+                start_seq=start_seq,
+            )
+        except Exception:
+            preview = self._naming_engine.render_filename(
+                self._naming_rule,
+                seq=start_seq,
+                file_format=self._selected_save_format,
+            )
+        if self._next_filename_preview != preview:
+            self._next_filename_preview = preview
+            self.nextFilenamePreviewChanged.emit()
 
     @Property("QStringList", notify=scannerChanged)
     def scanners(self) -> list[str]:
@@ -226,9 +311,11 @@ class AppViewModel(QObject):
 
     @selectedResolution.setter
     def selectedResolution(self, value: int) -> None:
-        if self._selected_resolution != int(value):
-            self._selected_resolution = int(value)
+        int_val = int(value)
+        if self._selected_resolution != int_val:
+            self._selected_resolution = int_val
             self.resolutionChanged.emit()
+            self._persist_config()
 
     @Property("QStringList", notify=saveFormatChanged)
     def saveFormats(self) -> list[str]:
@@ -240,9 +327,12 @@ class AppViewModel(QObject):
 
     @selectedSaveFormat.setter
     def selectedSaveFormat(self, value: str) -> None:
-        if self._selected_save_format != value:
-            self._selected_save_format = value
+        normalized = normalize_save_format(value)
+        if self._selected_save_format != normalized:
+            self._selected_save_format = normalized
             self.saveFormatChanged.emit()
+            self._refresh_next_filename_preview()
+            self._persist_config()
 
     @Property(str, notify=saveDirectoryChanged)
     def saveDirectory(self) -> str:
@@ -250,9 +340,20 @@ class AppViewModel(QObject):
 
     @saveDirectory.setter
     def saveDirectory(self, value: str) -> None:
-        if self._save_directory != value:
-            self._save_directory = value
+        cleaned = value.strip() or "~/Pictures/Scans"
+        if self._save_directory != cleaned:
+            self._save_directory = cleaned
             self.saveDirectoryChanged.emit()
+            self._refresh_next_filename_preview()
+            self._persist_config()
+
+    @Slot(str)
+    def setSaveDirectoryFromUrl(self, folder_url: str) -> None:
+        """Convert a QML `FolderDialog` file URL to an OS-native path and update `saveDirectory`."""
+        qurl = QUrl(folder_url)
+        local_path = qurl.toLocalFile() if qurl.isLocalFile() else folder_url
+        if local_path:
+            self.saveDirectory = local_path
 
     @Property(str, notify=namingRuleChanged)
     def namingRule(self) -> str:
@@ -263,6 +364,48 @@ class AppViewModel(QObject):
         if self._naming_rule != value:
             self._naming_rule = value
             self.namingRuleChanged.emit()
+            self._refresh_next_filename_preview()
+            self._persist_config()
+
+    @Property(int, notify=jpegQualityChanged)
+    def jpegQuality(self) -> int:
+        return self._jpeg_quality
+
+    @jpegQuality.setter
+    def jpegQuality(self, value: int) -> None:
+        clamped = max(1, min(100, int(value)))
+        if self._jpeg_quality != clamped:
+            self._jpeg_quality = clamped
+            self.jpegQualityChanged.emit()
+            self._persist_config()
+
+    @Property(bool, notify=multipagePdfChanged)
+    def multipagePdf(self) -> bool:
+        return self._multipage_pdf
+
+    @multipagePdf.setter
+    def multipagePdf(self, value: bool) -> None:
+        flag = bool(value)
+        if self._multipage_pdf != flag:
+            self._multipage_pdf = flag
+            self.multipagePdfChanged.emit()
+            self._persist_config()
+
+    @Property(str, notify=nextFilenamePreviewChanged)
+    def nextFilenamePreview(self) -> str:
+        return self._next_filename_preview
+
+    @Property(int, notify=scanSaveChanged)
+    def savedFileCount(self) -> int:
+        return self._saved_file_count
+
+    @Property(str, notify=scanSaveChanged)
+    def lastSavedFileName(self) -> str:
+        return self._last_saved_file_name
+
+    @Property(int, notify=scanSaveChanged)
+    def pendingPdfPageCount(self) -> int:
+        return self._pending_pdf_page_count
 
     @Property(str, notify=statusMessageChanged)
     def statusMessage(self) -> str:
@@ -384,6 +527,7 @@ class AppViewModel(QObject):
             self.set_status_message(
                 f"接続完了: {model_title} (最大 {max_mm} / {len(self._paper_sizes)}種類のサイズ・向き / {len(self._resolutions)}段階のDPIに対応)"
             )
+            self._persist_config()
         except Exception as exc:
             self.set_status_message(f"スキャナ能力の取得に失敗しました ({scanner.base_url}): {exc}")
 
@@ -440,6 +584,7 @@ class AppViewModel(QObject):
             self.set_status_message(
                 f"接続完了: {scanner.name} (最大 {max_mm} / {len(self._paper_sizes)}種類のサイズ・向き / {len(self._resolutions)}段階のDPIに対応)"
             )
+            self._persist_config()
         except Exception as exc:
             self.set_status_message(f"指定アドレス ({scanner.capabilities_url}) からの能力取得に失敗しました: {exc}")
 
@@ -468,16 +613,20 @@ class AppViewModel(QObject):
         else:
             self.set_status_message(f"プレビュースキャンエラー: {error_msg}")
 
+    def _ensure_scanner_connected(self) -> DiscoveredScanner | None:
+        scanner = self._discovered_by_label.get(self._selected_scanner)
+        if scanner is None:
+            self.refreshScanners()
+            scanner = self._discovered_by_label.get(self._selected_scanner)
+        return scanner
+
     @Slot()
     def requestPreview(self) -> None:
         """Execute a fast low-DPI preview scan and display it on the QML preview canvas."""
         if self._is_busy:
             return
 
-        scanner = self._discovered_by_label.get(self._selected_scanner)
-        if scanner is None:
-            self.refreshScanners()
-            scanner = self._discovered_by_label.get(self._selected_scanner)
+        scanner = self._ensure_scanner_connected()
         if scanner is None:
             self.set_status_message(
                 "プレビューを実行するスキャナが接続されていません（「スキャナを再検索」またはIP接続を行ってください）"
@@ -513,15 +662,135 @@ class AppViewModel(QObject):
 
     @Slot()
     def cancelPreview(self) -> None:
-        """Cancel an in-progress preview scan."""
+        """Cancel an in-progress preview or main scan."""
         if self._is_busy:
             self._cancel_requested = True
             self._set_busy(False)
-            self.set_status_message("プレビュースキャンをキャンセルしました")
+            self.set_status_message("スキャンをキャンセルしました")
+
+    def _build_current_save_profile(self, scanner: DiscoveredScanner) -> ScanSaveProfile:
+        active_caps = self._source_caps_by_label.get(self._selected_input_source, DEFAULT_PLATEN_CAPS)
+        paper_opt = self.current_paper_size_option
+        if paper_opt is None:
+            paper_opt = self._paper_size_resolver.resolve_for_source(active_caps)[0]
+        return ScanSaveProfile(
+            base_url=scanner.base_url,
+            source_caps=active_caps,
+            paper_size=paper_opt,
+            save_dir=Path(self._save_directory).expanduser(),
+            naming_template=self._naming_rule,
+            file_format=self._selected_save_format,
+            resolution_dpi=self._selected_resolution,
+            quality=self._jpeg_quality,
+            multipage_pdf=self._multipage_pdf,
+        )
+
+    def _on_scan_save_finished(self, result_obj: object) -> None:
+        self._set_busy(False)
+        if self._cancel_requested or not isinstance(result_obj, ContinuousScanStepResult):
+            self.set_status_message("スキャンをキャンセルしました")
+            return
+
+        # Show the newly scanned image on the preview canvas as immediate visual confirmation
+        try:
+            url = self._image_provider.update_image_bytes(result_obj.last_image_bytes)
+            self._preview_image_url = url
+            if self._preview_session is None and self._continuous_session is not None:
+                prof = self._continuous_session.profile
+                self._preview_session = PreviewSession(
+                    image_bytes=result_obj.last_image_bytes,
+                    content_type="image/jpeg",
+                    image_width_px=self._image_provider.current_image.width(),
+                    image_height_px=self._image_provider.current_image.height(),
+                    preview_dpi=prof.resolution_dpi,
+                    paper_size=prof.paper_size,
+                    input_source=prof.source_caps.source,
+                )
+            self.previewChanged.emit()
+        except Exception:
+            pass
+
+        self._saved_file_count = result_obj.total_saved_files
+        self._pending_pdf_page_count = result_obj.buffered_page_count
+        if result_obj.saved_results:
+            last_path = result_obj.saved_results[-1].output_path
+            self._last_saved_file_name = last_path.name
+            self.set_status_message(
+                f"保存完了 ({self._saved_file_count}件目): {last_path} — 次の原稿を置いて続けてスキャンできます"
+            )
+        else:
+            self.set_status_message(
+                f"マルチページPDFに {self._pending_pdf_page_count} ページ目を追加しました（続けてスキャン、または「PDFを保存して完了」）"
+            )
+        self.scanSaveChanged.emit()
+        self._refresh_next_filename_preview()
+
+    def _on_scan_save_failed(self, error_msg: str) -> None:
+        self._set_busy(False)
+        if self._cancel_requested:
+            self.set_status_message("スキャンをキャンセルしました")
+        else:
+            self.set_status_message(f"本スキャン・保存エラー: {error_msg}")
 
     @Slot()
     def requestScanAndSave(self) -> None:
-        """Trigger main scan and save (implemented in REQ-004)."""
+        """Execute main high-DPI scan and save using the locked-in continuous scan settings."""
+        if self._is_busy:
+            return
+
+        scanner = self._ensure_scanner_connected()
+        if scanner is None:
+            self.set_status_message(
+                "スキャンを実行するスキャナが接続されていません（「スキャナを再検索」またはIP接続を行ってください）"
+            )
+            return
+
+        profile = self._build_current_save_profile(scanner)
+        if self._continuous_session is None:
+            self._continuous_session = ContinuousScanSession(
+                profile,
+                scan_client_factory=self._scan_client_factory,
+                naming_engine=self._naming_engine,
+                exporter=self._exporter,
+            )
+        else:
+            self._continuous_session.update_profile(profile)
+
+        self._cancel_requested = False
+        self._set_busy(True)
         self.set_status_message(
-            f"本スキャン開始: {self._selected_input_source} / {self._selected_paper_size} / {self._selected_resolution} dpi / {self._selected_save_format}"
+            f"本スキャン中 ({profile.resolution_dpi} dpi / {profile.file_format} / 品質 {profile.quality}%)..."
         )
+        session = self._continuous_session
+
+        def _worker() -> None:
+            try:
+                step_result = session.scan_and_save_next()
+                self._scanSaveFinishedInternal.emit(step_result)
+            except Exception as exc:
+                self._scanSaveFailedInternal.emit(str(exc))
+
+        if self._run_preview_async:
+            thread = threading.Thread(target=_worker, daemon=True)
+            thread.start()
+        else:
+            _worker()
+
+    @Slot()
+    def finalizeMultipagePdf(self) -> None:
+        """Write buffered pages in the active continuous session into one multi-page PDF."""
+        if self._continuous_session is None or self._continuous_session.pending_page_count == 0:
+            self.set_status_message("結合するスキャン済みページがありません")
+            return
+        try:
+            exported = self._continuous_session.finalize_multipage_pdf()
+            self._saved_file_count = len(self._continuous_session.saved_results)
+            self._pending_pdf_page_count = 0
+            self._last_saved_file_name = exported.output_path.name
+            self.scanSaveChanged.emit()
+            self._refresh_next_filename_preview()
+            self.set_status_message(
+                f"マルチページPDF保存完了 ({exported.page_count}ページ): {exported.output_path}"
+            )
+        except Exception as exc:
+            self.set_status_message(f"マルチページPDF保存エラー: {exc}")
