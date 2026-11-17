@@ -1,6 +1,6 @@
 # REQ-001: プロジェクト基盤（uv + pyproject.toml）と宣言的UI（QML）のベース構築
 
-- **ステータス**: `未着手`
+- **ステータス**: `完了`
 - **優先ターゲット**: Brother × macOS（Windows クロスプラットフォーム対応を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261117.md`](./drafts/20261117.md)
 - **依存する先行要件**: なし
@@ -30,10 +30,10 @@
 
 ## 3. 完了条件（Acceptance Criteria）
 
-- [ ] `uv sync` で依存関係がエラーなくインストールできること
-- [ ] `uv run open-escl-client` で QML ベースのメインウィンドウが macOS 上で起動すること
-- [ ] UI のレイアウト定義が `.py` ファイルではなく `.qml` ファイルに宣言的に分離されており、構造が人間にとって読みやすいこと
-- [ ] `uv run pytest` で初期テストスイートが実行・パスすること
+- [x] `uv sync` で依存関係がエラーなくインストールできること
+- [x] `uv run open-escl-client` で QML ベースのメインウィンドウが macOS 上で起動すること
+- [x] UI のレイアウト定義が `.py` ファイルではなく `.qml` ファイルに宣言的に分離されており、構造が人間にとって読みやすいこと
+- [x] `uv run pytest` で初期テストスイートが実行・パスすること
 
 ---
 
@@ -49,7 +49,7 @@ chore/setup-uv-and-declarative-ui
 
 ### タスク 1: uv と pyproject.toml によるプロジェクト初期化とディレクトリ骨格の作成
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `pyproject.toml` を作成し、Python バージョン制約、依存ライブラリ、スクリプトエントリポイント（`open-escl-client`）、および `pytest` / `ruff` 設定を定義する
   - `src/open_escl_client/` 配下に `core/`, `escl/`, `imaging/`, `config/`, `ui/` のモジュール骨格と `tests/` ディレクトリを作成する
@@ -75,7 +75,7 @@ chore(config): uvとpyproject.tomlによるPythonプロジェクト基盤を構�
 
 ### タスク 2: QML による宣言的メインウィンドウ UI と ViewModel ブリッジの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/qml/Main.qml` およびパネル別コンポーネント（`ScannerSidebar.qml`, `PreviewArea.qml`, `ActionToolbar.qml`）を宣言的に記述する
   - Python 側の状態・操作を QML にバインディングする `AppViewModel`（`QObject` ベース）とアプリケーション起動処理を実装する
@@ -101,7 +101,7 @@ Pythonコード内にUI配置をハードコードすると画面構造の把握
 
 ### タスク 3: UI 起動・ViewModel バインディングの単体テストと開発手順ドキュメントの追加
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - ヘッドレス（オフスクリーン）環境で QML エンジンのロードと `AppViewModel` のプロパティバインディングを検証するテストを追加する
   - `README.md` に `uv` を使ったセットアップ手順・起動方法・`.qml` ファイルの編集ガイドを記載する
