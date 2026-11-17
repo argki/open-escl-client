@@ -9,7 +9,7 @@ import QtQuick.Layouts
 //   1. スキャナ選択セクション（mDNS自動検索・IP/URL直接指定）
 //   2. 読み取り設定セクション（給紙元［原稿台/ADF］・用紙サイズ・解像度DPI）
 //      ※ 用紙サイズにマウスポインタをかざすと「原稿台への置き方イメージ図」を表示
-//   3. 保存設定セクション（保存先フォルダ・ネーミングルール・ファイル形式）
+//   3. 保存設定セクション（SaveSettingsPanel: フォルダ・命名規則・形式・圧縮品質）
 // ============================================================================
 Rectangle {
     id: sidebarRoot
@@ -209,74 +209,12 @@ Rectangle {
             }
 
             // ----------------------------------------------------------------
-            // セクション 3: 保存設定（フォルダ・ネーミングルール・形式）
+            // セクション 3: 保存設定（フォルダ・ネーミングルール・形式・圧縮品質）
             // ----------------------------------------------------------------
-            GroupBox {
-                title: "3. 保存設定（フォルダ・命名規則・形式）"
+            SaveSettingsPanel {
                 Layout.fillWidth: true
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 10
-
-                    Label {
-                        text: "デフォルト保存先フォルダ"
-                        font.bold: true
-                        color: "#374151"
-                    }
-
-                    TextField {
-                        id: saveDirField
-                        objectName: "saveDirField"
-                        Layout.fillWidth: true
-                        text: viewModel ? viewModel.saveDirectory : ""
-                        placeholderText: "~/Pictures/Scans"
-                        onEditingFinished: {
-                            if (viewModel) {
-                                viewModel.saveDirectory = text
-                            }
-                        }
-                    }
-
-                    Label {
-                        text: "ネーミングルール（日付・連番）"
-                        font.bold: true
-                        color: "#374151"
-                    }
-
-                    TextField {
-                        id: namingRuleField
-                        objectName: "namingRuleField"
-                        Layout.fillWidth: true
-                        text: viewModel ? viewModel.namingRule : ""
-                        placeholderText: "Scan_{date}_{seq:03d}"
-                        onEditingFinished: {
-                            if (viewModel) {
-                                viewModel.namingRule = text
-                            }
-                        }
-                    }
-
-                    Label {
-                        text: "保存ファイル形式"
-                        font.bold: true
-                        color: "#374151"
-                    }
-
-                    ComboBox {
-                        id: saveFormatCombo
-                        objectName: "saveFormatCombo"
-                        Layout.fillWidth: true
-                        model: viewModel ? viewModel.saveFormats : []
-                        onActivated: function(index) {
-                            if (viewModel && model[index]) {
-                                viewModel.selectedSaveFormat = model[index]
-                            }
-                        }
-                    }
-                }
             }
 
             Item { Layout.fillHeight: true }

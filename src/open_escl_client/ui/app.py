@@ -9,6 +9,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
+from open_escl_client.config.user_config import UserConfigStore
 from open_escl_client.ui.viewmodel import AppViewModel
 
 QML_DIR = Path(__file__).resolve().parent / "qml"
@@ -33,7 +34,8 @@ def run_gui_app(argv: list[str] | None = None) -> int:
     app.setApplicationName("Open eSCL Client")
     app.setOrganizationName("open-escl-client")
 
-    engine, vm = create_qml_engine(AppViewModel(run_preview_async=True))
+    vm = AppViewModel(config_store=UserConfigStore(), run_preview_async=True)
+    engine, vm = create_qml_engine(vm)
     if not engine.rootObjects():
         return 1
     QTimer.singleShot(150, vm.refreshScanners)
