@@ -5,19 +5,19 @@ import QtQuick.Layouts
 // ============================================================================
 // PaperPlacementPreview.qml: 原稿台に対する用紙の置き方イメージ図コンポーネント
 // ----------------------------------------------------------------------------
-// 役割:
-//   - 外側の大きな四角: 原稿台（スキャナガラス面全体: bedWidthMm × bedHeightMm）
-//   - 内側の四角:       原稿（用紙: paperWidthMm × paperHeightMm）
-//   - 原稿台の四角の中に、原稿の四角がどの向き（縦置き / 横置き）・どの大きさで
-//     置かれるかを要素の重なりなく明快に図解する
+// 物理的な原稿台（正面から見た図）:
+//   - 横方向（左右）が長辺（例: MFC-J6580CDW では 432 mm）、奥行き方向（上下）が短辺（297 mm）
+//   - 上辺が「奥（カバーヒンジ側）」、下辺が「手前（正面・操作パネル側）」
+//   - 基準点（原点マーク）は「左奥（左上角）」
+//   - 外側の横長の四角（原稿台）の中に、内側の四角（原稿: 縦置き / 横置き）を描画する
 // ============================================================================
 Rectangle {
     id: previewCard
     objectName: "paperPlacementPreview"
-    implicitWidth: 340
-    implicitHeight: 430
-    width: 340
-    height: 430
+    implicitWidth: 380
+    implicitHeight: 370
+    width: 380
+    height: 370
     radius: 10
     color: "#FFFFFF"
     border.color: "#94A3B8"
@@ -30,9 +30,9 @@ Rectangle {
     readonly property string orientation: guideData && guideData.orientation ? guideData.orientation : "portrait"
     readonly property real paperW: guideData && guideData.paperWidthMm ? guideData.paperWidthMm : 210
     readonly property real paperH: guideData && guideData.paperHeightMm ? guideData.paperHeightMm : 297
-    readonly property real bedW: guideData && guideData.bedWidthMm ? guideData.bedWidthMm : 216
+    readonly property real bedW: guideData && guideData.bedWidthMm ? guideData.bedWidthMm : 432
     readonly property real bedH: guideData && guideData.bedHeightMm ? guideData.bedHeightMm : 297
-    readonly property real wRatio: guideData && guideData.widthRatio ? guideData.widthRatio : 0.97
+    readonly property real wRatio: guideData && guideData.widthRatio ? guideData.widthRatio : 0.49
     readonly property real hRatio: guideData && guideData.heightRatio ? guideData.heightRatio : 1.0
     readonly property string hintText: guideData && guideData.placementHint ? guideData.placementHint : ""
 
@@ -49,17 +49,17 @@ Rectangle {
 
         Row {
             width: parent.width
-            spacing: 8
+            spacing: 6
 
             Label {
-                text: "原稿台への置き方イメージ"
+                text: "原稿台への置き方イメージ（正面から見た図）"
                 font.pixelSize: 12
                 font.bold: true
                 color: "#475569"
             }
 
             Label {
-                text: "（原稿台: " + Math.round(previewCard.bedW) + "×" + Math.round(previewCard.bedH) + " mm）"
+                text: "原稿台: 横" + Math.round(previewCard.bedW) + "×奥行" + Math.round(previewCard.bedH) + "mm"
                 font.pixelSize: 11
                 color: "#64748B"
             }
@@ -70,7 +70,7 @@ Rectangle {
             objectName: "placementGuideTitleLabel"
             width: parent.width
             text: previewCard.paperLabel
-            font.pixelSize: 14
+            font.pixelSize: 13
             font.bold: true
             color: "#0F172A"
             elide: Text.ElideRight
@@ -78,55 +78,80 @@ Rectangle {
     }
 
     // ------------------------------------------------------------------------
-    // 2. 中央の図解ステージ領域（固定高さ 270px: 原稿台の四角の中に原稿の四角を描画）
+    // 2. 中央の図解ステージ領域（固定高さ 220px: 横長の原稿台の四角の中に原稿の四角を描画）
     // ------------------------------------------------------------------------
     Rectangle {
         id: diagramContainer
         objectName: "diagramContainer"
         anchors.top: headerSection.bottom
-        anchors.topMargin: 10
+        anchors.topMargin: 8
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.leftMargin: 14
         anchors.rightMargin: 14
-        height: 270
+        height: 220
         radius: 6
         color: "#F8FAFC"
         border.color: "#E2E8F0"
         border.width: 1
 
-        // 基準角の凡例ラベル（上部外側）
-        Label {
-            id: originLegendLabel
+        // 奥側ラベルと左奥基準点の説明（上部外側）
+        Row {
+            id: backSideHeader
             anchors.top: parent.top
             anchors.left: parent.left
+            anchors.right: parent.right
             anchors.topMargin: 6
-            anchors.leftMargin: 10
-            text: "● 左上が原稿台の基準角（原点）"
-            font.pixelSize: 11
-            color: "#DC2626"
+            anchors.leftMargin: 14
+            anchors.rightMargin: 14
+            spacing: 12
+
+            Label {
+                text: "↘ 基準点マーク（左奥）"
+                font.pixelSize: 11
+                font.bold: true
+                color: "#DC2626"
+            }
+
+            Label {
+                text: "【奥側（カバーヒンジ側）】"
+                font.pixelSize: 11
+                color: "#64748B"
+            }
         }
 
-        // 図解描画キャンバス領域（凡例ラベルの下）
+        // 手前（正面）ラベル（下部外側）
+        Label {
+            id: frontSideFooter
+            anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottomMargin: 5
+            text: "▲ 手前（正面・操作パネル側）"
+            font.pixelSize: 11
+            color: "#64748B"
+        }
+
+        // 図解描画キャンバス領域（奥側ラベルと手前ラベルの間）
         Item {
             id: bedStageArea
-            anchors.top: originLegendLabel.bottom
+            anchors.top: backSideHeader.bottom
             anchors.topMargin: 6
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 10
+            anchors.bottom: frontSideFooter.top
+            anchors.bottomMargin: 6
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.leftMargin: 16
             anchors.rightMargin: 16
 
-            readonly property real availW: Math.max(80, width)
+            readonly property real availW: Math.max(120, width)
             readonly property real availH: Math.max(80, height)
+            // 横方向（bedW）が長く、奥行き方向（bedH）が短い横長アスペクト比
             readonly property real bedAspect: previewCard.bedW / Math.max(1.0, previewCard.bedH)
-            readonly property real computedBedH: Math.min(availH, availW / Math.max(0.1, bedAspect))
-            readonly property real computedBedW: computedBedH * bedAspect
+            readonly property real computedBedW: Math.min(availW, availH * bedAspect)
+            readonly property real computedBedH: computedBedW / Math.max(0.1, bedAspect)
 
             // ================================================================
-            // 外側の四角: 原稿台（スキャナガラス面全体）
+            // 外側の四角: 原稿台（正面から見て横方向が長く、奥行きが短いガラス面）
             // ================================================================
             Rectangle {
                 id: scannerBedRect
@@ -139,45 +164,37 @@ Rectangle {
                 border.width: 2
                 radius: 2
 
-                // 原稿台の中央下部に薄く「原稿台（ガラス面）」と表示
+                // 原稿台ガラス面の右下に薄く「原稿台ガラス面」と表示
                 Label {
-                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.right: parent.right
                     anchors.bottom: parent.bottom
+                    anchors.rightMargin: 6
                     anchors.bottomMargin: 4
-                    text: "原稿台（ガラス面）"
+                    text: "原稿台ガラス面"
                     font.pixelSize: 10
                     color: "#64748B"
-                    visible: previewCard.hRatio < 0.88
+                    visible: previewCard.wRatio < 0.85 || previewCard.hRatio < 0.85
                 }
 
                 // ============================================================
-                // 内側の四角: 原稿（実際に置く用紙の四角）
+                // 内側の四角: 原稿（左奥の基準点に合わせて置かれる用紙の四角）
                 // ============================================================
                 Rectangle {
                     id: paperSheetRect
                     objectName: "paperSheetRect"
                     x: 2
                     y: 2
-                    width: Math.max(28, (scannerBedRect.width - 4) * previewCard.wRatio)
-                    height: Math.max(28, (scannerBedRect.height - 4) * previewCard.hRatio)
+                    width: Math.max(32, (scannerBedRect.width - 4) * previewCard.wRatio)
+                    height: Math.max(32, (scannerBedRect.height - 4) * previewCard.hRatio)
                     color: "#EFF6FF"
                     border.color: "#0284C7"
                     border.width: 2
                     radius: 1
 
-                    // 原稿の上辺を示すライン（どの辺が上か一目でわかるガイド）
-                    Rectangle {
-                        anchors.top: parent.top
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 4
-                        color: "#0284C7"
-                    }
-
                     // 原稿の四角の中央ラベル（向き・寸法）
                     Column {
                         anchors.centerIn: parent
-                        spacing: 3
+                        spacing: 2
                         width: parent.width - 6
 
                         Label {
@@ -186,7 +203,7 @@ Rectangle {
                             text: previewCard.orientation === "landscape"
                                   ? "原稿（横置き）"
                                   : (previewCard.orientation === "maximum" ? "原稿台全体" : "原稿（縦置き）")
-                            font.pixelSize: paperSheetRect.width < 80 ? 10 : 12
+                            font.pixelSize: paperSheetRect.width < 90 ? 10 : 12
                             font.bold: true
                             color: "#0369A1"
                             elide: Text.ElideRight
@@ -195,23 +212,23 @@ Rectangle {
                         Label {
                             width: parent.width
                             horizontalAlignment: Text.AlignHCenter
-                            text: Math.round(previewCard.paperW) + " × " + Math.round(previewCard.paperH) + " mm"
-                            font.pixelSize: paperSheetRect.width < 80 ? 9 : 11
+                            text: "横" + Math.round(previewCard.paperW) + " × 奥行" + Math.round(previewCard.paperH) + " mm"
+                            font.pixelSize: paperSheetRect.width < 90 ? 9 : 10
                             color: "#0284C7"
                             elide: Text.ElideRight
-                            visible: paperSheetRect.height >= 42
+                            visible: paperSheetRect.height >= 40
                         }
                     }
                 }
 
-                // 左上の基準角（赤い丸印）
+                // 左奥の基準点マーク（赤い丸印）
                 Rectangle {
-                    width: 10
-                    height: 10
-                    radius: 5
+                    width: 12
+                    height: 12
+                    radius: 6
                     color: "#DC2626"
-                    x: -4
-                    y: -4
+                    x: -5
+                    y: -5
                 }
             }
         }
@@ -224,7 +241,7 @@ Rectangle {
         id: placementGuideHintLabel
         objectName: "placementGuideHintLabel"
         anchors.top: diagramContainer.bottom
-        anchors.topMargin: 10
+        anchors.topMargin: 8
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom

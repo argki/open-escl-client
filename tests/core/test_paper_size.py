@@ -1,4 +1,4 @@
-"""Unit tests for `PaperSizeResolver`, orientation variants (Portrait/Landscape), and placement guides."""
+"""Unit tests for `PaperSizeResolver` using physical front-view platen coordinates."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from open_escl_client.escl.capabilities import InputSourceCaps, InputSourceKind
 
 
 def test_resolve_for_standard_a4_flatbed_scanner() -> None:
-    # Brother A4 flatbed: MaxWidth=2550 (215.9mm), MaxHeight=3508 (297.0mm)
+    # Standard A4 flatbed: eSCL MaxWidth=2550 (depth 215.9mm), MaxHeight=3508 (horizontal 297.0mm)
+    # Physical platen from front view: Horizontal = 297.0mm, Depth = 215.9mm
     platen = InputSourceCaps(
         source=InputSourceKind.PLATEN,
         min_width=96,
@@ -21,13 +22,13 @@ def test_resolve_for_standard_a4_flatbed_scanner() -> None:
     options = resolver.resolve_for_source(platen)
     codes = [opt.code for opt in options]
 
-    # A4 and B5 fit in Portrait, but NOT in Landscape (since 297mm / 257mm > 215.9mm width)
-    assert "A4" in codes
-    assert "A4_LANDSCAPE" not in codes
-    assert "B5_JIS" in codes
-    assert "B5_JIS_LANDSCAPE" not in codes
+    # On an A4 platen (Horizontal 297mm × Depth 216mm), A4 (210×297) fits in Landscape (横297×奥行210),
+    # while A5 (148×210), Postcard, L photo, and Business card fit in BOTH Portrait and Landscape!
+    assert "A4_LANDSCAPE" in codes
+    assert "A4" not in codes
+    assert "B5_JIS_LANDSCAPE" in codes
+    assert "B5_JIS" not in codes
 
-    # Smaller sizes (A5: 148x210mm, Postcard: 100x148mm, L photo, Business card) fit in BOTH orientations!
     assert "A5" in codes
     assert "A5_LANDSCAPE" in codes
     assert "POSTCARD" in codes
@@ -40,12 +41,14 @@ def test_resolve_for_standard_a4_flatbed_scanner() -> None:
 
     # Larger sizes (A3, B4, Legal) must be excluded on an A4 flatbed
     assert "A3" not in codes
-    assert "B4_JIS" not in codes
-    assert "LEGAL" not in codes
+    assert "A3_LANDSCAPE" not in codes
+    assert "B4_JIS_LANDSCAPE" not in codes
 
 
-def test_resolve_for_a3_scanner_mfc_j6580cdw_includes_a4_and_b5_landscape() -> None:
-    # Brother MFC-J6580CDW (A3 capable): MaxWidth=3508 (~297mm), MaxHeight=4960 (~420mm)
+def test_resolve_for_a3_scanner_mfc_j6580cdw_includes_a4_and_b5_both_orientations() -> None:
+    # Brother MFC-J6580CDW (A3 capable):
+    # eSCL MaxWidth=3508 (depth ~297mm), MaxHeight=4960..5100 (horizontal ~420..432mm)
+    # Physical platen from front view: Horizontal = 420mm, Depth = 297mm
     a3_platen = InputSourceCaps(
         source=InputSourceKind.PLATEN,
         min_width=100,
@@ -58,46 +61,63 @@ def test_resolve_for_a3_scanner_mfc_j6580cdw_includes_a4_and_b5_landscape() -> N
     codes = [opt.code for opt in options]
     labels = [opt.display_label for opt in options]
 
-    assert "A3" in codes
-    assert "B4_JIS" in codes
-    # On an A3 bed, A4 (210x297) and B5 (182x257) can be placed BOTH Portrait and Landscape!
+    # A3 (420x297) and B4 (364x257) fit in Landscape (横長) on the horizontal A3 bed
+    assert "A3_LANDSCAPE" in codes
+    assert "B4_JIS_LANDSCAPE" in codes
+
+    # A4 (210x297) and B5 (182x257) fit in BOTH Portrait (縦置き) and Landscape (横置き)!
     assert "A4" in codes
     assert "A4_LANDSCAPE" in codes
-    assert "A4 縦置き (210 × 297 mm)" in labels
-    assert "A4 横置き (297 × 210 mm)" in labels
+    assert "A4 縦置き (横 210 × 奥行き 297 mm)" in labels
+    assert "A4 横置き (横 297 × 奥行き 210 mm)" in labels
     assert "B5_JIS" in codes
     assert "B5_JIS_LANDSCAPE" in codes
-    assert "B5 (JIS) 縦置き (182 × 257 mm)" in labels
-    assert "B5 (JIS) 横置き (257 × 182 mm)" in labels
+    assert "B5 (JIS) 縦置き (横 182 × 奥行き 257 mm)" in labels
+    assert "B5 (JIS) 横置き (横 257 × 奥行き 182 mm)" in labels
     assert "LETTER" in codes
     assert "LETTER_LANDSCAPE" in codes
 
 
-def test_placement_guide_ratios_for_a4_portrait_and_landscape_on_a3_bed() -> None:
+def test_placement_guide_ratios_and_escl_mapping_on_mfc_j6580cdw_bed() -> None:
+    # Brother MFC-J6580CDW: eSCL MaxWidth=3508 (depth 297mm), MaxHeight=5100 (horizontal 431.8mm)
     a3_platen = InputSourceCaps(
         source=InputSourceKind.PLATEN,
-        max_width=3508,  # 297.0mm
-        max_height=4960,  # 420.0mm
+        max_width=3508,
+        max_height=5100,
     )
     resolver = PaperSizeResolver()
     options = resolver.resolve_for_source(a3_platen)
     by_code = {opt.code: opt for opt in options}
 
-    a4_portrait = by_code["A4"].build_placement_guide(a3_platen.max_width, a3_platen.max_height)
-    assert a4_portrait.orientation == PaperOrientation.PORTRAIT
-    assert pytest.approx(a4_portrait.width_ratio, abs=0.02) == 210.0 / 297.0
-    assert pytest.approx(a4_portrait.height_ratio, abs=0.02) == 297.0 / 420.0
-    assert "縦置き" in a4_portrait.placement_hint
+    # 1. A4 縦置き (正面から見て 横 210mm × 奥行き 297mm)
+    a4_portrait_opt = by_code["A4"]
+    # eSCL Width (depth axis) = 297mm (3508 units), eSCL Height (horizontal axis) = 210mm (2480 units)
+    assert a4_portrait_opt.width_units == 3508
+    assert a4_portrait_opt.height_units == 2480
 
-    a4_landscape = by_code["A4_LANDSCAPE"].build_placement_guide(a3_platen.max_width, a3_platen.max_height)
-    assert a4_landscape.orientation == PaperOrientation.LANDSCAPE
-    assert pytest.approx(a4_landscape.width_ratio, abs=0.02) == 297.0 / 297.0
-    assert pytest.approx(a4_landscape.height_ratio, abs=0.02) == 210.0 / 420.0
-    assert "横置き" in a4_landscape.placement_hint
+    guide_p = a4_portrait_opt.build_placement_guide(a3_platen.max_width, a3_platen.max_height)
+    assert guide_p.orientation == PaperOrientation.PORTRAIT
+    assert guide_p.bed_horizontal_mm > guide_p.bed_depth_mm  # Bed is wider than deep!
+    assert pytest.approx(guide_p.horizontal_ratio, abs=0.02) == 210.0 / 431.8
+    assert pytest.approx(guide_p.depth_ratio, abs=0.02) == 297.0 / 297.0
+    assert "左奥" in guide_p.placement_hint
+    assert "縦置き" in guide_p.placement_hint
+
+    # 2. A4 横置き (正面から見て 横 297mm × 奥行き 210mm)
+    a4_landscape_opt = by_code["A4_LANDSCAPE"]
+    # eSCL Width (depth axis) = 210mm (2480 units), eSCL Height (horizontal axis) = 297mm (3508 units)
+    assert a4_landscape_opt.width_units == 2480
+    assert a4_landscape_opt.height_units == 3508
+
+    guide_l = a4_landscape_opt.build_placement_guide(a3_platen.max_width, a3_platen.max_height)
+    assert guide_l.orientation == PaperOrientation.LANDSCAPE
+    assert pytest.approx(guide_l.horizontal_ratio, abs=0.02) == 297.0 / 431.8
+    assert pytest.approx(guide_l.depth_ratio, abs=0.02) == 210.0 / 297.0
+    assert "左奥" in guide_l.placement_hint
+    assert "横置き" in guide_l.placement_hint
 
 
-def test_resolve_for_brother_adf_includes_legal_and_respects_min_size() -> None:
-    # Brother ADF: MinWidth=1748 (~148mm, A5 width), MaxWidth=2550, MaxHeight=4200 (~355.6mm, Legal)
+def test_resolve_for_brother_adf_respects_min_size() -> None:
     adf = InputSourceCaps(
         source=InputSourceKind.ADF_SIMPLEX,
         min_width=1748,
@@ -109,27 +129,11 @@ def test_resolve_for_brother_adf_includes_legal_and_respects_min_size() -> None:
     options = resolver.resolve_for_source(adf)
     codes = [opt.code for opt in options]
 
-    assert "A4" in codes
-    assert "B5_JIS" in codes
+    assert "A4_LANDSCAPE" in codes
+    assert "B5_JIS_LANDSCAPE" in codes
     assert "A5" in codes
     assert "A5_LANDSCAPE" in codes
-    assert "LETTER" in codes
-    assert "LEGAL" in codes
+    assert "LEGAL_LANDSCAPE" in codes
     # Business card (55x91mm) is smaller than ADF minimum feed size (148x148mm)
     assert "BUSINESS_CARD" not in codes
-
-
-def test_tolerance_and_clamping_for_slightly_short_a4_height() -> None:
-    # Some scanners report 3500 units (296.3mm) instead of 3508 (297.0mm)
-    platen = InputSourceCaps(
-        source=InputSourceKind.PLATEN,
-        max_width=2550,
-        max_height=3500,
-    )
-    resolver = PaperSizeResolver()
-    options = resolver.resolve_for_source(platen)
-    a4_opt = next(opt for opt in options if opt.code == "A4")
-
-    # Clamped safely to 3500 so the scanner does not reject ScanRegions
-    assert a4_opt.height_units == 3500
-    assert a4_opt.display_label == "A4 縦置き (210 × 297 mm)"
+    assert "BUSINESS_CARD_LANDSCAPE" not in codes

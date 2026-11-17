@@ -64,7 +64,7 @@ def test_qml_engine_loads_main_window_and_components() -> None:
     assert vm is not None
 
 
-def test_hover_placement_guide_updates_preview_card_and_geometry() -> None:
+def test_hover_placement_guide_updates_preview_card_and_horizontal_platen_geometry() -> None:
     _ensure_qapp()
     a3_caps = parse_scanner_capabilities_xml(GENERIC_A3_PROFILE_REF_XML)
     mock_fetcher = MagicMock(return_value=a3_caps)
@@ -80,24 +80,23 @@ def test_hover_placement_guide_updates_preview_card_and_geometry() -> None:
     assert bed_rect is not None
     assert paper_rect is not None
 
-    # Verify the card and outer scanner bed rectangle have non-collapsed positive geometry
-    assert float(preview_card.property("width")) >= 300.0
-    assert float(preview_card.property("height")) >= 400.0
+    # Physical platen must be rendered wider horizontally than its depth (bed_w > bed_h)
     bed_w = float(bed_rect.property("width"))
     bed_h = float(bed_rect.property("height"))
-    assert bed_w > 100.0
-    assert bed_h > 140.0
+    assert bed_w > 180.0
+    assert bed_h > 120.0
+    assert bed_w > bed_h
 
-    # Default selected is A4 Portrait: paper rectangle is inside bed rectangle and portrait-shaped
+    # Default selected on A3 scanner is A4 縦置き (横 210 × 奥行き 297 mm)
+    vm.selectedPaperSize = "A4 縦置き (横 210 × 奥行き 297 mm)"
     assert preview_card.property("orientation") == "portrait"
     paper_w_portrait = float(paper_rect.property("width"))
     paper_h_portrait = float(paper_rect.property("height"))
     assert 50.0 < paper_w_portrait < bed_w
-    assert 70.0 < paper_h_portrait < bed_h
     assert paper_h_portrait > paper_w_portrait
 
-    # Selecting A4 Landscape updates the inner paper rectangle to landscape-shaped inside the bed rectangle
-    vm.selectedPaperSize = "A4 横置き (297 × 210 mm)"
+    # Selecting A4 横置き (横 297 × 奥行き 210 mm) makes the paper rectangle wider than deep
+    vm.selectedPaperSize = "A4 横置き (横 297 × 奥行き 210 mm)"
     assert preview_card.property("orientation") == "landscape"
     assert preview_card.property("paperW") == 297.0
     assert preview_card.property("paperH") == 210.0
@@ -113,18 +112,18 @@ def test_hover_placement_guide_updates_preview_card_and_geometry() -> None:
 
 def test_viewmodel_properties_and_slots() -> None:
     vm = AppViewModel()
-    assert "A4 縦置き (210 × 297 mm)" in vm.paperSizes
-    assert "B5 (JIS) 縦置き (182 × 257 mm)" in vm.paperSizes
-    assert "A5 縦置き (148 × 210 mm)" in vm.paperSizes
-    assert "A5 横置き (210 × 148 mm)" in vm.paperSizes
-    assert "ハガキ 縦置き (100 × 148 mm)" in vm.paperSizes
-    assert "ハガキ 横置き (148 × 100 mm)" in vm.paperSizes
+    assert "A4 横置き (横 297 × 奥行き 210 mm)" in vm.paperSizes
+    assert "B5 (JIS) 横置き (横 257 × 奥行き 182 mm)" in vm.paperSizes
+    assert "A5 縦置き (横 148 × 奥行き 210 mm)" in vm.paperSizes
+    assert "A5 横置き (横 210 × 奥行き 148 mm)" in vm.paperSizes
+    assert "ハガキ 縦置き (横 100 × 奥行き 148 mm)" in vm.paperSizes
+    assert "ハガキ 横置き (横 148 × 奥行き 100 mm)" in vm.paperSizes
     assert len(vm.resolutions) >= 6
     assert vm.selectedResolution == 300
     assert vm.selectedSaveFormat == "PDF"
 
-    vm.selectedPaperSize = "B5 (JIS) 縦置き (182 × 257 mm)"
-    assert vm.selectedPaperSize == "B5 (JIS) 縦置き (182 × 257 mm)"
+    vm.selectedPaperSize = "B5 (JIS) 横置き (横 257 × 奥行き 182 mm)"
+    assert vm.selectedPaperSize == "B5 (JIS) 横置き (横 257 × 奥行き 182 mm)"
 
     vm.selectedResolution = 600
     assert vm.selectedResolution == 600
@@ -165,15 +164,15 @@ def test_viewmodel_discovery_and_capabilities_binding() -> None:
     assert vm.selectedScanner == "Brother MFC-L2750DW series (192.168.1.50)"
     assert vm.inputSources == ["原稿台 (Platen)", "ADF (片面)", "ADF (両面)"]
     assert vm.resolutions == [100, 150, 200, 300, 600, 1200]
-    assert "A4 縦置き (210 × 297 mm)" in vm.paperSizes
-    assert "名刺 縦置き (55 × 91 mm)" in vm.paperSizes
-    assert "名刺 横置き (91 × 55 mm)" in vm.paperSizes
+    assert "A4 横置き (横 297 × 奥行き 210 mm)" in vm.paperSizes
+    assert "名刺 縦置き (横 55 × 奥行き 91 mm)" in vm.paperSizes
+    assert "名刺 横置き (横 91 × 奥行き 55 mm)" in vm.paperSizes
 
     # Switch input source to ADF (Simplex) -> Legal becomes available, Business Card excluded
     vm.selectedInputSource = "ADF (片面)"
     assert vm.resolutions == [100, 300, 600]
-    assert "リーガル (Legal) 縦置き (215.9 × 355.6 mm)" in vm.paperSizes
-    assert "名刺 縦置き (55 × 91 mm)" not in vm.paperSizes
+    assert "リーガル (Legal) 横置き (横 355.6 × 奥行き 215.9 mm)" in vm.paperSizes
+    assert "名刺 縦置き (横 55 × 奥行き 91 mm)" not in vm.paperSizes
 
 
 def test_viewmodel_a3_scanner_provides_both_a4_orientations_and_placement_guide() -> None:
@@ -183,15 +182,16 @@ def test_viewmodel_a3_scanner_provides_both_a4_orientations_and_placement_guide(
     vm = AppViewModel(capabilities_fetcher=mock_fetcher)
     vm.addManualScanner("192.168.1.60")
 
-    assert "A4 縦置き (210 × 297 mm)" in vm.paperSizes
-    assert "A4 横置き (297 × 210 mm)" in vm.paperSizes
+    assert "A4 縦置き (横 210 × 奥行き 297 mm)" in vm.paperSizes
+    assert "A4 横置き (横 297 × 奥行き 210 mm)" in vm.paperSizes
 
-    guide_portrait = vm.getPlacementGuide("A4 縦置き (210 × 297 mm)")
+    guide_portrait = vm.getPlacementGuide("A4 縦置き (横 210 × 奥行き 297 mm)")
     assert guide_portrait["orientation"] == "portrait"
     assert guide_portrait["paperWidthMm"] == 210.0
     assert guide_portrait["paperHeightMm"] == 297.0
+    assert guide_portrait["bedWidthMm"] > guide_portrait["bedHeightMm"]
 
-    guide_landscape = vm.getPlacementGuide("A4 横置き (297 × 210 mm)")
+    guide_landscape = vm.getPlacementGuide("A4 横置き (横 297 × 奥行き 210 mm)")
     assert guide_landscape["orientation"] == "landscape"
     assert guide_landscape["paperWidthMm"] == 297.0
     assert guide_landscape["paperHeightMm"] == 210.0

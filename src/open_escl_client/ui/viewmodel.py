@@ -273,9 +273,9 @@ class AppViewModel(QObject):
         if prev_paper in self._paper_options_by_label:
             self._selected_paper_size = prev_paper
         else:
-            # Prefer A4 Portrait by default if supported, otherwise first option
+            # Prefer A4 (Portrait or Landscape) by default if supported, otherwise first option
             a4_label = next(
-                (opt.display_label for opt in paper_options if opt.code == "A4"),
+                (opt.display_label for opt in paper_options if opt.code in ("A4", "A4_LANDSCAPE")),
                 new_paper_labels[0],
             )
             self._selected_paper_size = a4_label

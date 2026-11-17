@@ -291,9 +291,9 @@ Rectangle {
         objectName: "placementGuidePopup"
         parent: sidebarRoot
         x: sidebarRoot.width + 14
-        y: Math.max(16, Math.min(sidebarRoot.height - 446, paperSizeCombo.mapToItem(sidebarRoot, 0, 0).y - 40))
-        width: 340
-        height: 430
+        y: Math.max(16, Math.min(sidebarRoot.height - 386, paperSizeCombo.mapToItem(sidebarRoot, 0, 0).y - 40))
+        width: 380
+        height: 370
         padding: 0
         modal: false
         focus: false
