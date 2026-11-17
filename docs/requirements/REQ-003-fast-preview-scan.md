@@ -1,6 +1,6 @@
 # REQ-003: 低解像度による高速プレビュースキャン機能とプレビューキャンバス表示
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（汎用 eSCL 機器・Windows 対応を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261117.md`](./drafts/20261117.md)
 - **依存する先行要件**: [`REQ-002`](./REQ-002-escl-discovery-and-paper-size.md)
@@ -47,7 +47,7 @@ feature/fast-preview-scan
 
 ### タスク 1: `/eSCL/ScanJobs` スキャンジョブ実行・画像取得クライアントの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `ScanSettings` XML ペイロード（解像度、読み取り領域 `ScanRegions`、カラーモード、フォーマット）を生成するビルダーを実装する
   - `POST /eSCL/ScanJobs` でジョブを作成し、`Location` ヘッダから `{JobUri}/NextDocument` を取得、完了または中断時に `DELETE {JobUri}` を行う `EsclScanClient` を実装する
