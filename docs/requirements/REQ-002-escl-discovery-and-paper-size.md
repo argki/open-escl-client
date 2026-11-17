@@ -1,6 +1,6 @@
 # REQ-002: eSCL スキャナ探索・能力取得と対応用紙サイズ（A4/B5等）の自動検知
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（汎用 eSCL 機器・Windows 対応を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261117.md`](./drafts/20261117.md)
 - **依存する先行要件**: [`REQ-001`](./REQ-001-project-foundation-and-declarative-ui.md)
@@ -43,7 +43,7 @@ feature/escl-discovery-and-capabilities
 
 ### タスク 1: mDNS (Bonjour) による eSCL スキャナ探索モジュールの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `zeroconf` を用いて `_uscan._tcp.local.`（HTTP）および `_uscans._tcp.local.`（HTTPS）サービスを探索する `EsclScannerDiscovery` クラスを実装する
   - TXT レコード（`ty`, `rs`, `uuid`, `note` 等）からモデル名・エンドポイント URL・Brother 機器判定フラグを抽出するデータモデルを定義する
