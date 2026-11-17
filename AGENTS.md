@@ -41,8 +41,13 @@
 1. **`decompose-requirements`** ([`.agents/skills/decompose-requirements/SKILL.md`](./.agents/skills/decompose-requirements/SKILL.md))
    - ユーザーが記述した要件を読み込み、1つのブランチで実施すべきかを判定します。
    - 複数ブランチに分割すべき場合は、ブランチ単位で適切な数の要件ファイル（`docs/requirements/REQ-XXX-<slug>.md`）に分解します。
-   - 各要件ファイル内にコミット単位のタスクを定義し、**ブランチ名（1種類）** と **各タスクのコミットメッセージ（1種類）** を提案します。
+   - 各要件ファイル内にコミット単位のタスクを定義し、**ブランチ名（1種類）** と **各タスクのコミットメッセージ（1種類）** を記載します。
+   - また、**分解して作成した要件ファイル自体をコミットするためのブランチ名（1種類）とコミットメッセージ（1種類）** をチャット画面に提案します。
 2. **`propose-git-commit`** ([`.agents/skills/propose-git-commit/SKILL.md`](./.agents/skills/propose-git-commit/SKILL.md))
-   - 指定された要件タスクの実施時や変更差分（`git diff` / `git status`）に基づき、切るべき **Git ブランチ名（1種類）** と、プルリクエストの内容をそのまま記載できるレベルの **コミットメッセージ（1種類）** を提案します。
+   - 指定された要件タスクの実施時や変更差分（`git diff` / `git status`）に基づき、切るべき **Git ブランチ名（1種類）** と、プルリクエストの内容をそのまま記載できるレベルの **コミットメッセージ（1種類）** をチャット画面に提案します。
 3. **`propose-pull-request`** ([`.agents/skills/propose-pull-request/SKILL.md`](./.agents/skills/propose-pull-request/SKILL.md))
-   - 対象ブランチの要件ファイル、コミット履歴（`git log`）、変更差分から、日本の開発現場で定評のあるテンプレート（[`.github/pull_request_template.md`](./.github/pull_request_template.md)）に準拠した **プルリクエストのタイトルと本文（1種類）** を提案します。
+   - 対象ブランチの要件ファイル、コミット履歴（`git log`）、変更差分から、日本の開発現場で定評のあるテンプレート（[`.github/pull_request_template.md`](./.github/pull_request_template.md)）に準拠した **プルリクエストのタイトルと本文（1種類）** をチャット画面に提案します。
+
+### チャット出力の原則
+- ファイルとして出力した内容は、改めてチャット画面に再掲・要約表示せず、ファイルへのリンクのみを提示します。
+- 一方で、**ブランチ名・コミットメッセージ・プルリクエストのタイトルと本文** は必ずチャット画面に表示します。
