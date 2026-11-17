@@ -1,6 +1,6 @@
 # REQ-001: プロジェクト基盤（uv + pyproject.toml）と宣言的UI（QML）のベース構築
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（Windows クロスプラットフォーム対応を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261117.md`](./drafts/20261117.md)
 - **依存する先行要件**: なし
@@ -49,7 +49,7 @@ chore/setup-uv-and-declarative-ui
 
 ### タスク 1: uv と pyproject.toml によるプロジェクト初期化とディレクトリ骨格の作成
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `pyproject.toml` を作成し、Python バージョン制約、依存ライブラリ、スクリプトエントリポイント（`open-escl-client`）、および `pytest` / `ruff` 設定を定義する
   - `src/open_escl_client/` 配下に `core/`, `escl/`, `imaging/`, `config/`, `ui/` のモジュール骨格と `tests/` ディレクトリを作成する
