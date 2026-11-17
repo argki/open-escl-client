@@ -13,7 +13,10 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"open-escl-client {__version__}")
         return 0
-    return 0
+
+    from open_escl_client.ui.app import run_gui_app
+
+    return run_gui_app([sys.argv[0], *args])
 
 
 if __name__ == "__main__":

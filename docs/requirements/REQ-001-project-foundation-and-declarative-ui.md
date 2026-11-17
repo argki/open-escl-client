@@ -75,7 +75,7 @@ chore(config): uvとpyproject.tomlによるPythonプロジェクト基盤を構�
 
 ### タスク 2: QML による宣言的メインウィンドウ UI と ViewModel ブリッジの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/qml/Main.qml` およびパネル別コンポーネント（`ScannerSidebar.qml`, `PreviewArea.qml`, `ActionToolbar.qml`）を宣言的に記述する
   - Python 側の状態・操作を QML にバインディングする `AppViewModel`（`QObject` ベース）とアプリケーション起動処理を実装する
