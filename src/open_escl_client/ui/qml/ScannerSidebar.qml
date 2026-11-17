@@ -6,8 +6,8 @@ import QtQuick.Layouts
 // ScannerSidebar.qml: 左側のスキャン設定・保存設定サイドバー
 // ----------------------------------------------------------------------------
 // セクション構成:
-//   1. スキャナ選択セクション（eSCLスキャナ一覧・再検索ボタン）
-//   2. 読み取り設定セクション（用紙サイズ［A4/B5/最大］・解像度DPI）
+//   1. スキャナ選択セクション（mDNS自動検索・IP/URL直接指定）
+//   2. 読み取り設定セクション（給紙元［原稿台/ADF］・用紙サイズ・解像度DPI）
 //   3. 保存設定セクション（保存先フォルダ・ネーミングルール・ファイル形式）
 // ============================================================================
 Rectangle {
@@ -26,7 +26,7 @@ Rectangle {
             Item { Layout.preferredHeight: 4 }
 
             // ----------------------------------------------------------------
-            // セクション 1: スキャナ選択
+            // セクション 1: スキャナ選択 (mDNS 自動検出 & IP/URL 直接指定)
             // ----------------------------------------------------------------
             GroupBox {
                 title: "1. スキャナ選択 (eSCL / AirScan)"
@@ -43,6 +43,11 @@ Rectangle {
                         objectName: "scannerCombo"
                         Layout.fillWidth: true
                         model: viewModel ? viewModel.scanners : []
+                        currentIndex: {
+                            if (!viewModel || !model) return 0
+                            var idx = model.indexOf(viewModel.selectedScanner)
+                            return idx >= 0 ? idx : 0
+                        }
                         onActivated: function(index) {
                             if (viewModel && model[index]) {
                                 viewModel.selectedScanner = model[index]
@@ -53,7 +58,7 @@ Rectangle {
                     Button {
                         id: refreshScannerButton
                         objectName: "refreshScannerButton"
-                        text: "スキャナを再検索"
+                        text: "スキャナを再検索 (mDNS / Bonjour)"
                         Layout.fillWidth: true
                         onClicked: {
                             if (viewModel) {
@@ -61,14 +66,43 @@ Rectangle {
                             }
                         }
                     }
+
+                    // IPアドレス / URL 直接接続（mDNSが届かない環境用フォールバック）
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        TextField {
+                            id: manualHostField
+                            objectName: "manualHostField"
+                            Layout.fillWidth: true
+                            placeholderText: "IP または URL (例: 192.168.1.50)"
+                            onAccepted: {
+                                if (viewModel && text.length > 0) {
+                                    viewModel.addManualScanner(text)
+                                }
+                            }
+                        }
+
+                        Button {
+                            id: connectManualButton
+                            objectName: "connectManualButton"
+                            text: "接続"
+                            onClicked: {
+                                if (viewModel && manualHostField.text.length > 0) {
+                                    viewModel.addManualScanner(manualHostField.text)
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             // ----------------------------------------------------------------
-            // セクション 2: 読み取りサイズ・解像度設定
+            // セクション 2: 読み取り設定（給紙元・用紙サイズ・解像度）
             // ----------------------------------------------------------------
             GroupBox {
-                title: "2. 読み取り設定（サイズ・解像度）"
+                title: "2. 読み取り設定（給紙元・サイズ・解像度）"
                 Layout.fillWidth: true
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
@@ -78,7 +112,30 @@ Rectangle {
                     spacing: 10
 
                     Label {
-                        text: "用紙サイズ"
+                        text: "給紙元（原稿台 / ADF）"
+                        font.bold: true
+                        color: "#374151"
+                    }
+
+                    ComboBox {
+                        id: inputSourceCombo
+                        objectName: "inputSourceCombo"
+                        Layout.fillWidth: true
+                        model: viewModel ? viewModel.inputSources : []
+                        currentIndex: {
+                            if (!viewModel || !model) return 0
+                            var idx = model.indexOf(viewModel.selectedInputSource)
+                            return idx >= 0 ? idx : 0
+                        }
+                        onActivated: function(index) {
+                            if (viewModel && model[index]) {
+                                viewModel.selectedInputSource = model[index]
+                            }
+                        }
+                    }
+
+                    Label {
+                        text: "用紙サイズ（スキャナ対応サイズ自動判定）"
                         font.bold: true
                         color: "#374151"
                     }
@@ -88,6 +145,11 @@ Rectangle {
                         objectName: "paperSizeCombo"
                         Layout.fillWidth: true
                         model: viewModel ? viewModel.paperSizes : []
+                        currentIndex: {
+                            if (!viewModel || !model) return 0
+                            var idx = model.indexOf(viewModel.selectedPaperSize)
+                            return idx >= 0 ? idx : 0
+                        }
                         onActivated: function(index) {
                             if (viewModel && model[index]) {
                                 viewModel.selectedPaperSize = model[index]
@@ -106,7 +168,11 @@ Rectangle {
                         objectName: "resolutionCombo"
                         Layout.fillWidth: true
                         model: viewModel ? viewModel.resolutions : []
-                        currentIndex: 1
+                        currentIndex: {
+                            if (!viewModel || !model) return 0
+                            var idx = model.indexOf(viewModel.selectedResolution)
+                            return idx >= 0 ? idx : 0
+                        }
                         onActivated: function(index) {
                             if (viewModel && model[index] !== undefined) {
                                 viewModel.selectedResolution = model[index]

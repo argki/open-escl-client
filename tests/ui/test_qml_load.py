@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QGuiApplication
 
+from open_escl_client.escl.capabilities import parse_scanner_capabilities_xml
+from open_escl_client.escl.discovery import DiscoveredScanner
 from open_escl_client.ui.app import MAIN_QML_PATH, create_qml_engine
 from open_escl_client.ui.viewmodel import AppViewModel
+from tests.escl.test_capabilities import BROTHER_CAPABILITIES_XML
 
 
 def _ensure_qapp() -> QGuiApplication:
@@ -35,6 +39,10 @@ def test_qml_engine_loads_main_window_and_components() -> None:
 
     # Verify key declarative UI regions exist by objectName
     assert root.findChild(QObject, "scannerCombo") is not None
+    assert root.findChild(QObject, "refreshScannerButton") is not None
+    assert root.findChild(QObject, "manualHostField") is not None
+    assert root.findChild(QObject, "connectManualButton") is not None
+    assert root.findChild(QObject, "inputSourceCombo") is not None
     assert root.findChild(QObject, "paperSizeCombo") is not None
     assert root.findChild(QObject, "resolutionCombo") is not None
     assert root.findChild(QObject, "saveDirField") is not None
@@ -45,7 +53,6 @@ def test_qml_engine_loads_main_window_and_components() -> None:
     assert root.findChild(QObject, "previewButton") is not None
     assert root.findChild(QObject, "scanAndSaveButton") is not None
 
-    # Clean up QML root objects
     for obj in roots:
         obj.deleteLater()
     engine.deleteLater()
@@ -55,11 +62,14 @@ def test_qml_engine_loads_main_window_and_components() -> None:
 def test_viewmodel_properties_and_slots() -> None:
     vm = AppViewModel()
     assert "A4 (210 × 297 mm)" in vm.paperSizes
+    assert "B5 (JIS) (182 × 257 mm)" in vm.paperSizes
+    assert "ハガキ (100 × 148 mm)" in vm.paperSizes
+    assert len(vm.resolutions) >= 6
     assert vm.selectedResolution == 300
     assert vm.selectedSaveFormat == "PDF"
 
-    vm.selectedPaperSize = "B5 (182 × 257 mm)"
-    assert vm.selectedPaperSize == "B5 (182 × 257 mm)"
+    vm.selectedPaperSize = "B5 (JIS) (182 × 257 mm)"
+    assert vm.selectedPaperSize == "B5 (JIS) (182 × 257 mm)"
 
     vm.selectedResolution = 600
     assert vm.selectedResolution == 600
@@ -70,11 +80,53 @@ def test_viewmodel_properties_and_slots() -> None:
     vm.namingRule = "Receipt_{date}_{seq:04d}"
     assert vm.namingRule == "Receipt_{date}_{seq:04d}"
 
-    vm.refreshScanners()
-    assert "検索中" in vm.statusMessage
-
     vm.requestPreview()
     assert "プレビュー" in vm.statusMessage
 
     vm.requestScanAndSave()
     assert "600 dpi" in vm.statusMessage
+
+
+def test_viewmodel_discovery_and_capabilities_binding() -> None:
+    brother_scanner = DiscoveredScanner(
+        name="Brother MFC-L2750DW series",
+        host="BRW001122334455.local",
+        port=80,
+        scheme="http",
+        addresses=("192.168.1.50",),
+    )
+    mock_discovery = MagicMock()
+    mock_discovery.discover.return_value = [brother_scanner]
+
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+
+    vm = AppViewModel(
+        discovery_service=mock_discovery,
+        capabilities_fetcher=mock_fetcher,
+    )
+    vm.refreshScanners()
+
+    assert vm.selectedScanner == "Brother MFC-L2750DW series (192.168.1.50)"
+    assert vm.inputSources == ["原稿台 (Platen)", "ADF (片面)", "ADF (両面)"]
+    assert vm.resolutions == [100, 150, 200, 300, 600, 1200]
+    assert "A4 (210 × 297 mm)" in vm.paperSizes
+    assert "名刺 (55 × 91 mm)" in vm.paperSizes
+
+    # Switch input source to ADF (Simplex) -> Legal becomes available, Business Card excluded, DPIs become [100, 300, 600]
+    vm.selectedInputSource = "ADF (片面)"
+    assert vm.resolutions == [100, 300, 600]
+    assert "リーガル (Legal) (215.9 × 355.6 mm)" in vm.paperSizes
+    assert "名刺 (55 × 91 mm)" not in vm.paperSizes
+
+
+def test_viewmodel_add_manual_scanner_by_ip() -> None:
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+
+    vm = AppViewModel(capabilities_fetcher=mock_fetcher)
+    vm.addManualScanner("192.168.1.50")
+
+    mock_fetcher.assert_called_once_with("http://192.168.1.50:80/eSCL/ScannerCapabilities")
+    assert "Brother MFC-L2750DW series" in vm.selectedScanner
+    assert "接続完了" in vm.statusMessage
