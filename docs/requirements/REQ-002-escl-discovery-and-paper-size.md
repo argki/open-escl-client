@@ -69,7 +69,7 @@ feat(discovery): mDNSによるeSCLスキャナ自動探索モジュールを実�
 
 ### タスク 2: `/eSCL/ScannerCapabilities` XML パーサと Brother 対応アダプタの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `/eSCL/ScannerCapabilities` から取得した XML をパースし、原稿台（`Platen`）および ADF（`AdfSimplex` / `AdfDuplex`）ごとの最小/最大サイズ（1/300 inch 単位）、対応解像度（`DiscreteResolutions` / `ResolutionRange`）、カラーモード、サポート形式（JPEG / PDF）を構造化するパーサを実装する
   - Brother 製スキャナの実機 XML サンプルを含むテストフィクスチャを作成し、名前空間の揺れやベンダー固有要素があっても確実にパースできるようアダプタ層を整える
