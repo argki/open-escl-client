@@ -1,5 +1,10 @@
 """Core business logic and domain models."""
 
+from open_escl_client.core.exporter import (
+    ExportOptions,
+    ExportResult,
+    ImageExporter,
+)
 from open_escl_client.core.naming import (
     DEFAULT_NAMING_TEMPLATE,
     FileNamingEngine,
@@ -23,7 +28,10 @@ from open_escl_client.core.preview_service import (
 __all__ = [
     "DEFAULT_NAMING_TEMPLATE",
     "STANDARD_PAPER_SIZES",
+    "ExportOptions",
+    "ExportResult",
     "FileNamingEngine",
+    "ImageExporter",
     "PaperOrientation",
     "PaperPlacementGuide",
     "PaperSizeOption",
