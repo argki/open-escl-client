@@ -1,5 +1,10 @@
 """Core business logic and domain models."""
 
+from open_escl_client.core.continuous_scan import (
+    ContinuousScanSession,
+    ContinuousScanStepResult,
+    ScanSaveProfile,
+)
 from open_escl_client.core.exporter import (
     ExportOptions,
     ExportResult,
@@ -28,6 +33,8 @@ from open_escl_client.core.preview_service import (
 __all__ = [
     "DEFAULT_NAMING_TEMPLATE",
     "STANDARD_PAPER_SIZES",
+    "ContinuousScanSession",
+    "ContinuousScanStepResult",
     "ExportOptions",
     "ExportResult",
     "FileNamingEngine",
@@ -38,6 +45,7 @@ __all__ = [
     "PaperSizeResolver",
     "PreviewScanService",
     "PreviewSession",
+    "ScanSaveProfile",
     "normalize_extension",
     "sanitize_filename_stem",
     "select_preview_dpi",
