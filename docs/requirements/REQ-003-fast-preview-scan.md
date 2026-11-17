@@ -32,7 +32,7 @@
 - [x] 「プレビュー」ボタンを押すと、本スキャン用の設定解像度に関わらず低解像度（75〜100dpi 等）で高速にスキャンが行われること
 - [x] Brother × macOS 環境（およびモックサーバー）で `/eSCL/ScanJobs` → `/NextDocument` の一連の通信が正常に完了し、プレビュー画像が画面に表示されること
 - [x] スキャン中の進行状態（スピナー・ステータスメッセージ）とキャンセル操作が機能すること
-- [ ] 原稿台の置き方イメージ通りに原稿を置いた際、プレビュー結果の画像が正しい向き・領域で表示されること（およびプレビュー画面上で90度単位の回転調整も行えること）
+- [ ] 選択した用紙サイズ・向き（A4 縦置き・横置き・最大サイズ等）およびプレビュー解像度（DPI）の指定がスキャナ側へ正しく反映され、指定通りの領域・サイズでプレビュー画像が取得・表示されること
 
 ---
 
@@ -122,30 +122,26 @@ feat(ui): QMLプレビューキャンバスへのスキャン画像表示と進�
 
 ---
 
-### タスク 4: ScanRegion が無視され見切れる問題の修正および原稿台の置き方とスキャン画像の向きを一致させる回転・座標補正の実装
+### タスク 4: ScanSettings XML の形式を修正し、指定した用紙サイズ・解像度がスキャナへ正しく反映されるようにする
 
 - **状態**: `[ ] 未完了`
 - **実装内容**:
-  - **用紙サイズや「最大サイズ」に変えても同じサイズ（`1680×2195 px`）になり見切れていた問題の修正**:
-    - PWG / eSCL の XML スキーマ（`xs:sequence`）では `<pwg:ScanRegion>` 内の要素順序が `<pwg:ContentRegionUnits>` → `<pwg:Height>` → `<pwg:Width>` → `<pwg:XOffset>` → `<pwg:YOffset>` と定義されているが、従来は `XOffset` / `YOffset` を先に配置し `pwg:MustHonor` 属性を付与していたため、Brother MFC-J6580CDW の XML パーサが `ScanRegion` のサイズ指定を無視してデフォルトサイズ（`1680×2195 px`）にフォールバックしていた問題を修正する
-    - スキャナが報告する `ScannerCapabilities` の `<pwg:Version>` やスキーマ順序に厳密に準拠した `ScanSettings` XML を生成するよう `build_scan_settings_xml` を修正する
-  - **原稿台の置き方（縦置き/横置き/最大サイズ）とプレビュー画像の向きの整合**:
-    - フラットベッド原稿台では eSCL の主走査軸（画像のX軸）が物理的な「奥行き方向（奥→手前）」、副走査軸（画像のY軸）が物理的な「横方向（左→右）」に対応しているため、正面から見て置いた原稿の向きおよび選択した用紙サイズ（縦置き・横置き・最大サイズ）に合わせて画像を自動回転・領域正規化する処理を `PreviewScanService` に実装する
-  - あわせて、プレビュー画面上でワンクリックで90度単位の回転調整（左90°回転・右90°回転）を行える機能を `AppViewModel` および `PreviewArea.qml` に追加する
+  - **確認された事象**: Brother MFC-J6580CDW 実機で用紙サイズや向き（A4 縦置き・最大サイズ等）を変更してプレビューを実行しても、指定が無視され常に同一のデフォルトサイズ（`1680×2195 px`）でスキャンされていた
+  - **修正内容**: `src/open_escl_client/escl/scan_client.py` の `build_scan_settings_xml` を修正し、改行・インデントを含まないコンパクト XML（`pretty_print=False`）かつ実機で領域・解像度指定が正しく受理される要素順序・属性（`pwg:Version` → `pwg:ScanRegions pwg:MustHonor="false"` → `pwg:ScanRegion`［`ContentRegionUnits`, `Width`, `Height`, `XOffset`, `YOffset`］→ `pwg:DocumentFormat` → `pwg:InputSource` → `scan:ColorMode` → `scan:XResolution` → `scan:YResolution`）へ変更する
+  - `tests/escl/test_scan_client.py` の単体テストを新しい XML 形式に合わせて更新し、サイズ・解像度の反映を確認する
 - **提案コミットメッセージ**:
 
 ```text
-fix(escl,scan,ui): ScanRegionが無視され見切れる不具合を修正し原稿台の置き方とプレビュー画像の向きを整合
+fix(escl): ScanSettings XMLの形式を修正し指定した用紙サイズと解像度がスキャナへ反映されるように改善
 
 ## 背景・目的
-Brother MFC-J6580CDW実機において、用紙サイズや向きを「A4 縦置き」や「最大サイズ」に変更しても常に同じデフォルトサイズ（1680×2195 px）でスキャンされて端が見切れ、かつスキャナの主走査・副走査の物理構造により画像が90度傾いて表示される問題を解消するため（REQ-003 タスク4）。
+Brother MFC-J6580CDW実機において、用紙サイズや向き（「A4 縦置き」「最大サイズ」等）を変更してプレビューを実行しても、送信した `ScanSettings` XML の領域・解像度指定が受理されず、常に同一のデフォルトサイズ（1680×2195 px）でスキャンされてしまう不具合を解消するため（REQ-003 タスク4）。
 
 ## 変更内容
-- `src/open_escl_client/escl/scan_client.py` の `build_scan_settings_xml` を修正し、Brother等のeSCLパーサが `ScanRegion` を無視しないようPWG XMLスキーマ順（`ContentRegionUnits` → `Height` → `Width` → `XOffset` → `YOffset`）に準拠させ、余分な属性を除去
-- `src/open_escl_client/core/preview_service.py` を更新し、原稿台（Platen）でのスキャン結果を選択された用紙サイズ・向き（縦置き / 横置き / 最大サイズ）に合わせて正しい向きへ自動回転・領域正規化する処理を実装
-- `src/open_escl_client/ui/viewmodel.py` および `src/open_escl_client/ui/qml/PreviewArea.qml` に、プレビュー画像を90度単位で左右に回転できる機能（`rotatePreviewLeft` / `rotatePreviewRight`）を追加
-- `tests/escl/test_scan_client.py`, `tests/core/test_preview_service.py`, `tests/ui/test_qml_load.py` に単体テストを追加し、`REQ-003` を完了に更新
+- `src/open_escl_client/escl/scan_client.py` の `build_scan_settings_xml` を修正し、余分な改行・インデントを含まないコンパクトなXML出力（`pretty_print=False`）およびeSCL標準クライアント互換の要素順序・属性（`pwg:MustHonor="false"`、`Width`→`Height`→`XOffset`→`YOffset`、`DocumentFormat`→`InputSource`→`ColorMode`→`XResolution`/`YResolution`）へ変更
+- `tests/escl/test_scan_client.py` のXML生成テストを更新し、`REQ-003` を完了に更新
 
 ## 影響範囲・備考
-- 対象機器: Brother MFC-J6580CDW等のeSCL対応フラットベッドスキャナ全般
+- 対象機器: Brother MFC-J6580CDW等のeSCL対応スキャナ全般
+- 実機で最大サイズ（3507×5100）・100 dpi 指定時に `1152×1693 px` として領域・解像度指定が正しく反映されることを確認済み
 ```
