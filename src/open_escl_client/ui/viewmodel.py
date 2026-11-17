@@ -160,6 +160,22 @@ class AppViewModel(QObject):
             self._selected_paper_size = value
             self.paperSizeChanged.emit()
 
+    @Property("QVariantMap", notify=paperSizeChanged)
+    def currentPlacementGuide(self) -> dict[str, object]:
+        """Return the placement guide dictionary for the currently selected paper size."""
+        return self.getPlacementGuide(self._selected_paper_size)
+
+    @Slot(str, result="QVariantMap")
+    def getPlacementGuide(self, paper_label: str) -> dict[str, object]:
+        """Return the placement guide dictionary for any paper size label (e.g., hovered in dropdown)."""
+        active_caps = self._source_caps_by_label.get(self._selected_input_source, DEFAULT_PLATEN_CAPS)
+        opt = self._paper_options_by_label.get(paper_label) or self.current_paper_size_option
+        if opt is None:
+            fallback_options = self._paper_size_resolver.resolve_for_source(active_caps)
+            opt = fallback_options[0]
+        guide = opt.build_placement_guide(active_caps.max_width, active_caps.max_height)
+        return guide.to_dict()
+
     @Property("QVariantList", notify=resolutionChanged)
     def resolutions(self) -> list[int]:
         return self._resolutions
@@ -257,8 +273,11 @@ class AppViewModel(QObject):
         if prev_paper in self._paper_options_by_label:
             self._selected_paper_size = prev_paper
         else:
-            # Prefer A4 by default if supported, otherwise first option
-            a4_label = next((opt.display_label for opt in paper_options if opt.code == "A4"), new_paper_labels[0])
+            # Prefer A4 Portrait by default if supported, otherwise first option
+            a4_label = next(
+                (opt.display_label for opt in paper_options if opt.code == "A4"),
+                new_paper_labels[0],
+            )
             self._selected_paper_size = a4_label
         self.paperSizeChanged.emit()
 
@@ -283,7 +302,7 @@ class AppViewModel(QObject):
             model_title = caps.make_and_model or scanner.name
             max_mm = f"{caps.primary_source.max_width_mm:.0f}×{caps.primary_source.max_height_mm:.0f}mm"
             self.set_status_message(
-                f"接続完了: {model_title} (最大 {max_mm} / {len(self._paper_sizes)}種類のサイズ・{len(self._resolutions)}段階のDPIに対応)"
+                f"接続完了: {model_title} (最大 {max_mm} / {len(self._paper_sizes)}種類のサイズ・向き / {len(self._resolutions)}段階のDPIに対応)"
             )
         except Exception as exc:
             self.set_status_message(f"スキャナ能力の取得に失敗しました ({scanner.base_url}): {exc}")
@@ -339,7 +358,7 @@ class AppViewModel(QObject):
             self._apply_capabilities(caps)
             max_mm = f"{caps.primary_source.max_width_mm:.0f}×{caps.primary_source.max_height_mm:.0f}mm"
             self.set_status_message(
-                f"接続完了: {scanner.name} (最大 {max_mm} / {len(self._paper_sizes)}種類のサイズ・{len(self._resolutions)}段階のDPIに対応)"
+                f"接続完了: {scanner.name} (最大 {max_mm} / {len(self._paper_sizes)}種類のサイズ・向き / {len(self._resolutions)}段階のDPIに対応)"
             )
         except Exception as exc:
             self.set_status_message(f"指定アドレス ({scanner.capabilities_url}) からの能力取得に失敗しました: {exc}")
