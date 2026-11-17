@@ -6,19 +6,21 @@ import QtQuick.Layouts
 // PaperPlacementPreview.qml: 原稿台に対する用紙の置き方イメージ図コンポーネント
 // ----------------------------------------------------------------------------
 // 役割:
-//   - 原稿台（スキャナガラス面全体: bedWidthMm × bedHeightMm）の外枠と基準角を表示
-//   - 選択・ホバー中の用紙（paperWidthMm × paperHeightMm）が原稿台に対して
-//     どの向き（縦置き / 横置き）・どのサイズ比率（widthRatio × heightRatio）で
-//     配置されるかを視覚的な図解として描画する
+//   - 外側の大きな四角: 原稿台（スキャナガラス面全体: bedWidthMm × bedHeightMm）
+//   - 内側の四角:       原稿（用紙: paperWidthMm × paperHeightMm）
+//   - 原稿台の四角の中に、原稿の四角がどの向き（縦置き / 横置き）・どの大きさで
+//     置かれるかを要素の重なりなく明快に図解する
 // ============================================================================
 Rectangle {
     id: previewCard
     objectName: "paperPlacementPreview"
-    width: 300
-    height: 350
-    radius: 8
+    implicitWidth: 340
+    implicitHeight: 430
+    width: 340
+    height: 430
+    radius: 10
     color: "#FFFFFF"
-    border.color: "#CBD5E1"
+    border.color: "#94A3B8"
     border.width: 1
 
     // ViewModel の getPlacementGuide() または currentPlacementGuide から渡される辞書
@@ -34,152 +36,205 @@ Rectangle {
     readonly property real hRatio: guideData && guideData.heightRatio ? guideData.heightRatio : 1.0
     readonly property string hintText: guideData && guideData.placementHint ? guideData.placementHint : ""
 
-    ColumnLayout {
-        anchors.fill: parent
+    // ------------------------------------------------------------------------
+    // 1. 上部ヘッダー領域（タイトル・用紙名・原稿台サイズ表記）
+    // ------------------------------------------------------------------------
+    Column {
+        id: headerSection
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
         anchors.margins: 14
-        spacing: 8
+        spacing: 4
 
-        // 1. ヘッダー（選択/ホバー中の用紙サイズ名）
-        Label {
-            Layout.fillWidth: true
-            text: "原稿台への置き方イメージ"
-            font.pixelSize: 12
-            font.bold: true
-            color: "#64748B"
+        Row {
+            width: parent.width
+            spacing: 8
+
+            Label {
+                text: "原稿台への置き方イメージ"
+                font.pixelSize: 12
+                font.bold: true
+                color: "#475569"
+            }
+
+            Label {
+                text: "（原稿台: " + Math.round(previewCard.bedW) + "×" + Math.round(previewCard.bedH) + " mm）"
+                font.pixelSize: 11
+                color: "#64748B"
+            }
         }
 
         Label {
+            id: placementGuideTitleLabel
             objectName: "placementGuideTitleLabel"
-            Layout.fillWidth: true
+            width: parent.width
             text: previewCard.paperLabel
             font.pixelSize: 14
             font.bold: true
             color: "#0F172A"
             elide: Text.ElideRight
         }
+    }
 
-        // 2. 原稿台（ガラス面）と用紙の図解ステージ
+    // ------------------------------------------------------------------------
+    // 2. 中央の図解ステージ領域（固定高さ 270px: 原稿台の四角の中に原稿の四角を描画）
+    // ------------------------------------------------------------------------
+    Rectangle {
+        id: diagramContainer
+        objectName: "diagramContainer"
+        anchors.top: headerSection.bottom
+        anchors.topMargin: 10
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.leftMargin: 14
+        anchors.rightMargin: 14
+        height: 270
+        radius: 6
+        color: "#F8FAFC"
+        border.color: "#E2E8F0"
+        border.width: 1
+
+        // 基準角の凡例ラベル（上部外側）
+        Label {
+            id: originLegendLabel
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.topMargin: 6
+            anchors.leftMargin: 10
+            text: "● 左上が原稿台の基準角（原点）"
+            font.pixelSize: 11
+            color: "#DC2626"
+        }
+
+        // 図解描画キャンバス領域（凡例ラベルの下）
         Item {
-            id: diagramContainer
-            Layout.fillWidth: true
-            Layout.fillHeight: true
+            id: bedStageArea
+            anchors.top: originLegendLabel.bottom
+            anchors.topMargin: 6
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 10
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
 
-            // 原稿台の縦横比を保って中央に配置
-            readonly property real maxDrawW: width - 16
-            readonly property real maxDrawH: height - 16
-            readonly property real bedAspect: previewCard.bedW / Math.max(1, previewCard.bedH)
-            readonly property real drawBedH: Math.min(maxDrawH, maxDrawW / Math.max(0.1, bedAspect))
-            readonly property real drawBedW: drawBedH * bedAspect
+            readonly property real availW: Math.max(80, width)
+            readonly property real availH: Math.max(80, height)
+            readonly property real bedAspect: previewCard.bedW / Math.max(1.0, previewCard.bedH)
+            readonly property real computedBedH: Math.min(availH, availW / Math.max(0.1, bedAspect))
+            readonly property real computedBedW: computedBedH * bedAspect
 
-            // 原稿台（スキャナガラス面全体）の外枠
+            // ================================================================
+            // 外側の四角: 原稿台（スキャナガラス面全体）
+            // ================================================================
             Rectangle {
                 id: scannerBedRect
                 objectName: "scannerBedRect"
-                width: diagramContainer.drawBedW
-                height: diagramContainer.drawBedH
+                width: bedStageArea.computedBedW
+                height: bedStageArea.computedBedH
                 anchors.centerIn: parent
-                color: "#F1F5F9"
-                border.color: "#64748B"
+                color: "#E2E8F0"
+                border.color: "#475569"
                 border.width: 2
-                radius: 3
+                radius: 2
 
-                // 原稿台全体のサイズ表記（右下）
+                // 原稿台の中央下部に薄く「原稿台（ガラス面）」と表示
                 Label {
-                    anchors.right: parent.right
+                    anchors.horizontalCenter: parent.horizontalCenter
                     anchors.bottom: parent.bottom
-                    anchors.margins: 4
-                    text: "原稿台: " + Math.round(previewCard.bedW) + "×" + Math.round(previewCard.bedH) + " mm"
+                    anchors.bottomMargin: 4
+                    text: "原稿台（ガラス面）"
                     font.pixelSize: 10
                     color: "#64748B"
+                    visible: previewCard.hRatio < 0.88
                 }
 
-                // 実際に置く用紙の矩形（左上基準角に揃えて描画）
+                // ============================================================
+                // 内側の四角: 原稿（実際に置く用紙の四角）
+                // ============================================================
                 Rectangle {
                     id: paperSheetRect
                     objectName: "paperSheetRect"
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.leftMargin: 2
-                    anchors.topMargin: 2
-                    width: Math.max(24, (parent.width - 4) * previewCard.wRatio)
-                    height: Math.max(24, (parent.height - 4) * previewCard.hRatio)
-                    color: previewCard.orientation === "landscape" ? "#DBEAFE" : "#E0F2FE"
+                    x: 2
+                    y: 2
+                    width: Math.max(28, (scannerBedRect.width - 4) * previewCard.wRatio)
+                    height: Math.max(28, (scannerBedRect.height - 4) * previewCard.hRatio)
+                    color: "#EFF6FF"
                     border.color: "#0284C7"
                     border.width: 2
-                    radius: 2
+                    radius: 1
 
-                    ColumnLayout {
+                    // 原稿の上辺を示すライン（どの辺が上か一目でわかるガイド）
+                    Rectangle {
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        height: 4
+                        color: "#0284C7"
+                    }
+
+                    // 原稿の四角の中央ラベル（向き・寸法）
+                    Column {
                         anchors.centerIn: parent
-                        spacing: 2
-                        width: parent.width - 8
+                        spacing: 3
+                        width: parent.width - 6
 
-                        // 向きのバッジ表示
                         Label {
-                            Layout.alignment: Qt.AlignHCenter
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
                             text: previewCard.orientation === "landscape"
-                                  ? "↔ 横置き"
-                                  : (previewCard.orientation === "maximum" ? "■ 全体" : "↕ 縦置き")
-                            font.pixelSize: 12
+                                  ? "原稿（横置き）"
+                                  : (previewCard.orientation === "maximum" ? "原稿台全体" : "原稿（縦置き）")
+                            font.pixelSize: paperSheetRect.width < 80 ? 10 : 12
                             font.bold: true
                             color: "#0369A1"
+                            elide: Text.ElideRight
                         }
 
-                        // 上辺（幅）× 縦辺（高さ）の寸法表示
                         Label {
-                            Layout.alignment: Qt.AlignHCenter
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
                             text: Math.round(previewCard.paperW) + " × " + Math.round(previewCard.paperH) + " mm"
-                            font.pixelSize: 10
+                            font.pixelSize: paperSheetRect.width < 80 ? 9 : 11
                             color: "#0284C7"
-                        }
-
-                        // 原稿の向きをイメージしやすいダミー文字ライン
-                        Rectangle {
-                            Layout.alignment: Qt.AlignHCenter
-                            Layout.preferredWidth: Math.min(parent.width * 0.65, 70)
-                            Layout.preferredHeight: 2
-                            color: "#38BDF8"
-                            visible: paperSheetRect.height > 55
-                        }
-                        Rectangle {
-                            Layout.alignment: Qt.AlignHCenter
-                            Layout.preferredWidth: Math.min(parent.width * 0.5, 52)
-                            Layout.preferredHeight: 2
-                            color: "#7DD3FC"
-                            visible: paperSheetRect.height > 70
+                            elide: Text.ElideRight
+                            visible: paperSheetRect.height >= 42
                         }
                     }
                 }
 
-                // 左上の基準角（▲マーク）
+                // 左上の基準角（赤い丸印）
                 Rectangle {
-                    width: 18
-                    height: 18
-                    radius: 9
+                    width: 10
+                    height: 10
+                    radius: 5
                     color: "#DC2626"
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.leftMargin: -7
-                    anchors.topMargin: -7
-
-                    Label {
-                        anchors.centerIn: parent
-                        text: "↖"
-                        font.pixelSize: 11
-                        font.bold: true
-                        color: "#FFFFFF"
-                    }
+                    x: -4
+                    y: -4
                 }
             }
         }
+    }
 
-        // 3. 置き方のテキストガイド
-        Label {
-            objectName: "placementGuideHintLabel"
-            Layout.fillWidth: true
-            text: previewCard.hintText
-            wrapMode: Text.Wrap
-            font.pixelSize: 11
-            color: "#334155"
-        }
+    // ------------------------------------------------------------------------
+    // 3. 下部の置き方ガイド説明文領域
+    // ------------------------------------------------------------------------
+    Label {
+        id: placementGuideHintLabel
+        objectName: "placementGuideHintLabel"
+        anchors.top: diagramContainer.bottom
+        anchors.topMargin: 10
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: 14
+        anchors.rightMargin: 14
+        anchors.bottomMargin: 10
+        text: previewCard.hintText
+        wrapMode: Text.Wrap
+        font.pixelSize: 11
+        color: "#334155"
+        verticalAlignment: Text.AlignTop
     }
 }

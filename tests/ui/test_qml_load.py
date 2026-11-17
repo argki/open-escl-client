@@ -64,7 +64,7 @@ def test_qml_engine_loads_main_window_and_components() -> None:
     assert vm is not None
 
 
-def test_hover_placement_guide_updates_preview_card() -> None:
+def test_hover_placement_guide_updates_preview_card_and_geometry() -> None:
     _ensure_qapp()
     a3_caps = parse_scanner_capabilities_xml(GENERIC_A3_PROFILE_REF_XML)
     mock_fetcher = MagicMock(return_value=a3_caps)
@@ -74,16 +74,37 @@ def test_hover_placement_guide_updates_preview_card() -> None:
     engine, _ = create_qml_engine(vm)
     root = engine.rootObjects()[0]
     preview_card = root.findChild(QObject, "paperPlacementPreview")
+    bed_rect = root.findChild(QObject, "scannerBedRect")
+    paper_rect = root.findChild(QObject, "paperSheetRect")
     assert preview_card is not None
+    assert bed_rect is not None
+    assert paper_rect is not None
 
-    # Default selected is A4 Portrait
+    # Verify the card and outer scanner bed rectangle have non-collapsed positive geometry
+    assert float(preview_card.property("width")) >= 300.0
+    assert float(preview_card.property("height")) >= 400.0
+    bed_w = float(bed_rect.property("width"))
+    bed_h = float(bed_rect.property("height"))
+    assert bed_w > 100.0
+    assert bed_h > 140.0
+
+    # Default selected is A4 Portrait: paper rectangle is inside bed rectangle and portrait-shaped
     assert preview_card.property("orientation") == "portrait"
+    paper_w_portrait = float(paper_rect.property("width"))
+    paper_h_portrait = float(paper_rect.property("height"))
+    assert 50.0 < paper_w_portrait < bed_w
+    assert 70.0 < paper_h_portrait < bed_h
+    assert paper_h_portrait > paper_w_portrait
 
-    # Selecting A4 Landscape updates the placement diagram to landscape
+    # Selecting A4 Landscape updates the inner paper rectangle to landscape-shaped inside the bed rectangle
     vm.selectedPaperSize = "A4 横置き (297 × 210 mm)"
     assert preview_card.property("orientation") == "landscape"
     assert preview_card.property("paperW") == 297.0
     assert preview_card.property("paperH") == 210.0
+    paper_w_landscape = float(paper_rect.property("width"))
+    paper_h_landscape = float(paper_rect.property("height"))
+    assert paper_w_landscape > paper_h_landscape
+    assert paper_w_landscape <= bed_w
 
     for obj in engine.rootObjects():
         obj.deleteLater()

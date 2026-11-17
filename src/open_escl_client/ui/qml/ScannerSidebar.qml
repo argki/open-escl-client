@@ -161,6 +161,8 @@ Rectangle {
                                 viewModel.selectedPaperSize = model[index]
                             }
                         }
+                        popup.y: paperSizeCombo.height + 2
+                        popup.height: Math.min(300, popup.contentHeight + 12)
                         popup.onClosed: {
                             sidebarRoot.hoveredPaperLabel = ""
                         }
@@ -288,8 +290,10 @@ Rectangle {
         id: placementGuidePopup
         objectName: "placementGuidePopup"
         parent: sidebarRoot
-        x: sidebarRoot.width + 12
-        y: Math.max(16, paperSizeCombo.mapToItem(sidebarRoot, 0, 0).y - 20)
+        x: sidebarRoot.width + 14
+        y: Math.max(16, Math.min(sidebarRoot.height - 446, paperSizeCombo.mapToItem(sidebarRoot, 0, 0).y - 40))
+        width: 340
+        height: 430
         padding: 0
         modal: false
         focus: false
