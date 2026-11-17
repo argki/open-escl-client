@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from urllib.parse import urlparse
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
 from open_escl_client.core.paper_size import PaperSizeOption, PaperSizeResolver
+from open_escl_client.core.preview_service import (
+    PreviewScanService,
+    PreviewSession,
+    select_preview_dpi,
+)
 from open_escl_client.escl.capabilities import (
     InputSourceCaps,
     InputSourceKind,
@@ -15,6 +21,7 @@ from open_escl_client.escl.capabilities import (
     fetch_scanner_capabilities,
 )
 from open_escl_client.escl.discovery import DiscoveredScanner, EsclScannerDiscovery
+from open_escl_client.ui.image_provider import PreviewImageProvider
 
 INPUT_SOURCE_LABELS: dict[InputSourceKind, str] = {
     InputSourceKind.PLATEN: "原稿台 (Platen)",
@@ -73,6 +80,12 @@ class AppViewModel(QObject):
     namingRuleChanged = Signal()
     statusMessageChanged = Signal()
     isBusyChanged = Signal()
+    previewChanged = Signal()
+    previewZoomChanged = Signal()
+
+    # Internal thread-safe completion signals for background preview scan
+    _previewFinishedInternal = Signal(object)
+    _previewFailedInternal = Signal(str)
 
     def __init__(
         self,
@@ -81,11 +94,19 @@ class AppViewModel(QObject):
         discovery_service: EsclScannerDiscovery | None = None,
         capabilities_fetcher: Callable[[str], ScannerCapabilities] = fetch_scanner_capabilities,
         paper_size_resolver: PaperSizeResolver | None = None,
+        preview_service: PreviewScanService | None = None,
+        run_preview_async: bool = False,
     ) -> None:
         super().__init__(parent)
         self._discovery_service = discovery_service or EsclScannerDiscovery(timeout_seconds=1.2)
         self._capabilities_fetcher = capabilities_fetcher
         self._paper_size_resolver = paper_size_resolver or PaperSizeResolver()
+        self._preview_service = preview_service or PreviewScanService()
+        self._run_preview_async = run_preview_async
+        self._image_provider = PreviewImageProvider()
+
+        self._previewFinishedInternal.connect(self._on_preview_finished)
+        self._previewFailedInternal.connect(self._on_preview_failed)
 
         self._discovered_by_label: dict[str, DiscoveredScanner] = {}
         self._current_capabilities: ScannerCapabilities | None = None
@@ -104,7 +125,11 @@ class AppViewModel(QObject):
             opt.display_label: opt for opt in initial_paper_options
         }
         self._paper_sizes: list[str] = [opt.display_label for opt in initial_paper_options]
-        self._selected_paper_size: str = self._paper_sizes[0]
+        a4_default = next(
+            (opt.display_label for opt in initial_paper_options if opt.code in ("A4", "A4_LANDSCAPE")),
+            self._paper_sizes[0],
+        )
+        self._selected_paper_size: str = a4_default
 
         self._resolutions: list[int] = list(DEFAULT_PLATEN_CAPS.resolutions)
         self._selected_resolution: int = 300 if 300 in self._resolutions else self._resolutions[0]
@@ -115,6 +140,21 @@ class AppViewModel(QObject):
         self._naming_rule: str = "Scan_{date}_{seq:03d}"
         self._status_message: str = "準備完了（Brother × macOS 優先モード）"
         self._is_busy: bool = False
+        self._cancel_requested: bool = False
+
+        self._preview_session: PreviewSession | None = None
+        self._preview_image_url: str = ""
+        self._preview_zoom: float = 1.0
+
+    @property
+    def image_provider(self) -> PreviewImageProvider:
+        """Return the `PreviewImageProvider` bound to `image://preview`."""
+        return self._image_provider
+
+    @property
+    def preview_session(self) -> PreviewSession | None:
+        """Return the latest `PreviewSession` if a preview has been captured."""
+        return self._preview_session
 
     @Property("QStringList", notify=scannerChanged)
     def scanners(self) -> list[str]:
@@ -237,6 +277,46 @@ class AppViewModel(QObject):
     def isBusy(self) -> bool:
         return self._is_busy
 
+    def _set_busy(self, busy: bool) -> None:
+        if self._is_busy != busy:
+            self._is_busy = busy
+            self.isBusyChanged.emit()
+
+    @Property(bool, notify=previewChanged)
+    def hasPreview(self) -> bool:
+        return self._preview_session is not None and bool(self._preview_image_url)
+
+    @Property(str, notify=previewChanged)
+    def previewImageUrl(self) -> str:
+        return self._preview_image_url
+
+    @Property(int, notify=previewChanged)
+    def previewDpi(self) -> int:
+        if self._preview_session is not None:
+            return self._preview_session.preview_dpi
+        active_caps = self._source_caps_by_label.get(self._selected_input_source, DEFAULT_PLATEN_CAPS)
+        return select_preview_dpi(active_caps.resolutions)
+
+    @Property(float, notify=previewZoomChanged)
+    def previewZoom(self) -> float:
+        return self._preview_zoom
+
+    @Slot()
+    def zoomInPreview(self) -> None:
+        self._preview_zoom = min(4.0, round(self._preview_zoom + 0.25, 2))
+        self.previewZoomChanged.emit()
+
+    @Slot()
+    def zoomOutPreview(self) -> None:
+        self._preview_zoom = max(0.5, round(self._preview_zoom - 0.25, 2))
+        self.previewZoomChanged.emit()
+
+    @Slot()
+    def resetPreviewZoom(self) -> None:
+        if self._preview_zoom != 1.0:
+            self._preview_zoom = 1.0
+            self.previewZoomChanged.emit()
+
     @property
     def current_paper_size_option(self) -> PaperSizeOption | None:
         """Return the currently selected `PaperSizeOption` domain object."""
@@ -273,7 +353,6 @@ class AppViewModel(QObject):
         if prev_paper in self._paper_options_by_label:
             self._selected_paper_size = prev_paper
         else:
-            # Prefer A4 (Portrait or Landscape) by default if supported, otherwise first option
             a4_label = next(
                 (opt.display_label for opt in paper_options if opt.code in ("A4", "A4_LANDSCAPE")),
                 new_paper_labels[0],
@@ -291,6 +370,7 @@ class AppViewModel(QObject):
         else:
             self._selected_resolution = new_resolutions[0]
         self.resolutionChanged.emit()
+        self.previewChanged.emit()
 
     def _load_capabilities_for_selected_scanner(self) -> None:
         scanner = self._discovered_by_label.get(self._selected_scanner)
@@ -363,10 +443,81 @@ class AppViewModel(QObject):
         except Exception as exc:
             self.set_status_message(f"指定アドレス ({scanner.capabilities_url}) からの能力取得に失敗しました: {exc}")
 
+    def _on_preview_finished(self, session_obj: object) -> None:
+        self._set_busy(False)
+        if self._cancel_requested or not isinstance(session_obj, PreviewSession):
+            self.set_status_message("プレビュースキャンをキャンセルしました")
+            return
+        try:
+            url = self._image_provider.update_image_bytes(session_obj.image_bytes)
+            self._preview_session = session_obj
+            self._preview_image_url = url
+            self._preview_zoom = 1.0
+            self.previewZoomChanged.emit()
+            self.previewChanged.emit()
+            self.set_status_message(
+                f"プレビュー完了 ({session_obj.preview_dpi} dpi / {session_obj.image_width_px}×{session_obj.image_height_px} px)"
+            )
+        except Exception as exc:
+            self.set_status_message(f"プレビュー画像の読み込みに失敗しました: {exc}")
+
+    def _on_preview_failed(self, error_msg: str) -> None:
+        self._set_busy(False)
+        if self._cancel_requested:
+            self.set_status_message("プレビュースキャンをキャンセルしました")
+        else:
+            self.set_status_message(f"プレビュースキャンエラー: {error_msg}")
+
     @Slot()
     def requestPreview(self) -> None:
-        """Trigger fast low-DPI preview scan (implemented in REQ-003)."""
-        self.set_status_message("低解像度プレビュースキャンを実行準備中...")
+        """Execute a fast low-DPI preview scan and display it on the QML preview canvas."""
+        if self._is_busy:
+            return
+
+        scanner = self._discovered_by_label.get(self._selected_scanner)
+        if scanner is None:
+            self.refreshScanners()
+            scanner = self._discovered_by_label.get(self._selected_scanner)
+        if scanner is None:
+            self.set_status_message(
+                "プレビューを実行するスキャナが接続されていません（「スキャナを再検索」またはIP接続を行ってください）"
+            )
+            return
+
+        active_caps = self._source_caps_by_label.get(self._selected_input_source, DEFAULT_PLATEN_CAPS)
+        paper_opt = self.current_paper_size_option
+        if paper_opt is None:
+            paper_opt = self._paper_size_resolver.resolve_for_source(active_caps)[0]
+
+        preview_dpi = select_preview_dpi(active_caps.resolutions)
+        self._cancel_requested = False
+        self._set_busy(True)
+        self.set_status_message(
+            f"低解像度プレビュースキャン中 ({preview_dpi} dpi / {paper_opt.name} {paper_opt.orientation_label})..."
+        )
+
+        base_url = scanner.base_url
+
+        def _worker() -> None:
+            try:
+                session = self._preview_service.execute_preview(base_url, active_caps, paper_opt)
+                self._previewFinishedInternal.emit(session)
+            except Exception as exc:
+                self._previewFailedInternal.emit(str(exc))
+
+        if self._run_preview_async:
+            thread = threading.Thread(target=_worker, daemon=True)
+            thread.start()
+        else:
+            _worker()
+
+    @Slot()
+    def cancelPreview(self) -> None:
+        """Cancel an in-progress preview scan."""
+        if self._is_busy:
+            self._cancel_requested = True
+            self._set_busy(False)
+            self.set_status_message("プレビュースキャンをキャンセルしました")
 
     @Slot()
     def requestScanAndSave(self) -> None:

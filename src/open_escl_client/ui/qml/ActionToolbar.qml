@@ -7,7 +7,7 @@ import QtQuick.Layouts
 // ----------------------------------------------------------------------------
 // 配置要素:
 //   - 左側: 現在のステータスメッセージ表示
-//   - 右側: 「高速プレビュー（低DPI）」ボタン、「スキャンして保存（連続スキャン対応）」ボタン
+//   - 右側: スキャン中キャンセルボタン、「高速プレビュー（低DPI）」ボタン、「スキャンして保存」ボタン
 // ============================================================================
 Rectangle {
     id: toolbarRoot
@@ -31,13 +31,31 @@ Rectangle {
             Layout.fillWidth: true
         }
 
+        // スキャン実行中のキャンセルボタン
+        Button {
+            id: cancelScanButton
+            objectName: "cancelScanButton"
+            text: "キャンセル"
+            visible: viewModel ? viewModel.isBusy : false
+            Layout.preferredHeight: 40
+            Layout.preferredWidth: 120
+            onClicked: {
+                if (viewModel) {
+                    viewModel.cancelPreview()
+                }
+            }
+        }
+
         // 高速プレビュー実行ボタン
         Button {
             id: previewButton
             objectName: "previewButton"
-            text: "高速プレビュー (低解像度)"
+            text: viewModel
+                  ? ("高速プレビュー (" + viewModel.previewDpi + " dpi)")
+                  : "高速プレビュー (低解像度)"
+            enabled: viewModel ? !viewModel.isBusy : true
             Layout.preferredHeight: 40
-            Layout.preferredWidth: 210
+            Layout.preferredWidth: 220
             onClicked: {
                 if (viewModel) {
                     viewModel.requestPreview()
@@ -51,6 +69,7 @@ Rectangle {
             objectName: "scanAndSaveButton"
             text: "スキャンして保存 (連続スキャン可)"
             highlighted: true
+            enabled: viewModel ? !viewModel.isBusy : true
             Layout.preferredHeight: 40
             Layout.preferredWidth: 250
             onClicked: {

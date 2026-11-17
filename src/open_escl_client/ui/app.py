@@ -16,9 +16,10 @@ MAIN_QML_PATH = QML_DIR / "Main.qml"
 
 
 def create_qml_engine(view_model: AppViewModel | None = None) -> tuple[QQmlApplicationEngine, AppViewModel]:
-    """Create and initialize the QQmlApplicationEngine with `Main.qml`."""
+    """Create and initialize the QQmlApplicationEngine with `Main.qml` and `PreviewImageProvider`."""
     vm = view_model if view_model is not None else AppViewModel()
     engine = QQmlApplicationEngine()
+    engine.addImageProvider("preview", vm.image_provider)
     engine.rootContext().setContextProperty("viewModel", vm)
     engine.addImportPath(str(QML_DIR))
     engine.load(QUrl.fromLocalFile(str(MAIN_QML_PATH)))
@@ -32,7 +33,7 @@ def run_gui_app(argv: list[str] | None = None) -> int:
     app.setApplicationName("Open eSCL Client")
     app.setOrganizationName("open-escl-client")
 
-    engine, vm = create_qml_engine()
+    engine, vm = create_qml_engine(AppViewModel(run_preview_async=True))
     if not engine.rootObjects():
         return 1
     QTimer.singleShot(150, vm.refreshScanners)

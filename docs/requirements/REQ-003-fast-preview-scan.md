@@ -1,6 +1,6 @@
 # REQ-003: 低解像度による高速プレビュースキャン機能とプレビューキャンバス表示
 
-- **ステータス**: `未着手`
+- **ステータス**: `完了`
 - **優先ターゲット**: Brother × macOS（汎用 eSCL 機器・Windows 対応を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261117.md`](./drafts/20261117.md)
 - **依存する先行要件**: [`REQ-002`](./REQ-002-escl-discovery-and-paper-size.md)
@@ -29,9 +29,10 @@
 
 ## 3. 完了条件（Acceptance Criteria）
 
-- [ ] 「プレビュー」ボタンを押すと、本スキャン用の設定解像度に関わらず低解像度（75〜100dpi 等）で高速にスキャンが行われること
-- [ ] Brother × macOS 環境（およびモックサーバー）で `/eSCL/ScanJobs` → `/NextDocument` の一連の通信が正常に完了し、プレビュー画像が画面に表示されること
-- [ ] スキャン中の進行状態（スピナー・ステータスメッセージ）とキャンセル操作が機能すること
+- [x] 「プレビュー」ボタンを押すと、本スキャン用の設定解像度に関わらず低解像度（75〜100dpi 等）で高速にスキャンが行われること
+- [x] Brother × macOS 環境（およびモックサーバー）で `/eSCL/ScanJobs` → `/NextDocument` の一連の通信が正常に完了し、プレビュー画像が画面に表示されること
+- [x] スキャン中の進行状態（スピナー・ステータスメッセージ）とキャンセル操作が機能すること
+- [x] 選択した用紙サイズ・向き（A4 縦置き・横置き・最大サイズ等）およびプレビュー解像度（DPI）の指定がスキャナ側へ正しく反映され、指定通りの領域・サイズでプレビュー画像が取得・表示されること
 
 ---
 
@@ -47,7 +48,7 @@ feature/fast-preview-scan
 
 ### タスク 1: `/eSCL/ScanJobs` スキャンジョブ実行・画像取得クライアントの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `ScanSettings` XML ペイロード（解像度、読み取り領域 `ScanRegions`、カラーモード、フォーマット）を生成するビルダーを実装する
   - `POST /eSCL/ScanJobs` でジョブを作成し、`Location` ヘッダから `{JobUri}/NextDocument` を取得、完了または中断時に `DELETE {JobUri}` を行う `EsclScanClient` を実装する
@@ -73,7 +74,7 @@ eSCLプロトコルを用いてBrother製スキャナおよび汎用eSCL機器�
 
 ### タスク 2: 待ち時間を短縮する低解像度（低DPI）プレビュースキャン制御の実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - スキャナの `ScannerCapabilities` から取得した対応解像度リストを参照し、プレビュー用として最も高速に読み取れる低解像度（75dpi / 100dpi / 150dpi のうち利用可能な最小値）を自動決定する `PreviewScanService` を実装する
   - プレビュー結果の画像データと読み取り時の座標スケール情報（本スキャン時の座標変換やトリミング枠計算に使用）を保持する `PreviewSession` モデルを作成する
@@ -98,7 +99,7 @@ feat(scan): 低解像度(DPI)自動選択による高速プレビュースキャ
 
 ### タスク 3: QML プレビューキャンバス（`PreviewArea.qml`）への画像描画と非同期ステータス表示
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - Python 側の画像（NumPy / Pillow / `QImage`）を QML へ高速に渡す `QQuickImageProvider` を実装する
   - `PreviewArea.qml` と `ActionToolbar.qml` を更新し、「プレビュー」ボタン押下による非同期スキャン実行、ローディング表示、プレビュー画像の表示（ズーム・フィット表示）を実装する
@@ -117,4 +118,30 @@ feat(ui): QMLプレビューキャンバスへのスキャン画像表示と進�
 
 ## 影響範囲・備考
 - 対象OS: macOS / Windows 共通（UIスレッドをブロックしない非同期スキャン実行）
+```
+
+---
+
+### タスク 4: ScanSettings XML の形式を修正し、指定した用紙サイズ・解像度がスキャナへ正しく反映されるようにする
+
+- **状態**: `[x] 完了`
+- **実装内容**:
+  - **確認された事象**: Brother MFC-J6580CDW 実機で用紙サイズや向き（A4 縦置き・最大サイズ等）を変更してプレビューを実行しても、指定が無視され常に同一のデフォルトサイズ（`1680×2195 px`）でスキャンされていた
+  - **修正内容**: `src/open_escl_client/escl/scan_client.py` の `build_scan_settings_xml` を修正し、改行・インデントを含まないコンパクト XML（`pretty_print=False`）かつ実機で領域・解像度指定が正しく受理される要素順序・属性（`pwg:Version` → `pwg:ScanRegions pwg:MustHonor="false"` → `pwg:ScanRegion`［`ContentRegionUnits`, `Width`, `Height`, `XOffset`, `YOffset`］→ `pwg:DocumentFormat` → `pwg:InputSource` → `scan:ColorMode` → `scan:XResolution` → `scan:YResolution`）へ変更する
+  - `tests/escl/test_scan_client.py` の単体テストを新しい XML 形式に合わせて更新し、サイズ・解像度の反映を確認する
+- **提案コミットメッセージ**:
+
+```text
+fix(escl): ScanSettings XMLの形式を修正し指定した用紙サイズと解像度がスキャナへ反映されるように改善
+
+## 背景・目的
+Brother MFC-J6580CDW実機において、用紙サイズや向き（「A4 縦置き」「最大サイズ」等）を変更してプレビューを実行しても、送信した `ScanSettings` XML の領域・解像度指定が受理されず、常に同一のデフォルトサイズ（1680×2195 px）でスキャンされてしまう不具合を解消するため（REQ-003 タスク4）。
+
+## 変更内容
+- `src/open_escl_client/escl/scan_client.py` の `build_scan_settings_xml` を修正し、余分な改行・インデントを含まないコンパクトなXML出力（`pretty_print=False`）およびeSCL標準クライアント互換の要素順序・属性（`pwg:MustHonor="false"`、`Width`→`Height`→`XOffset`→`YOffset`、`DocumentFormat`→`InputSource`→`ColorMode`→`XResolution`/`YResolution`）へ変更
+- `tests/escl/test_scan_client.py` のXML生成テストを更新し、`REQ-003` を完了に更新
+
+## 影響範囲・備考
+- 対象機器: Brother MFC-J6580CDW等のeSCL対応スキャナ全般
+- 実機で最大サイズ（3507×5100）・100 dpi 指定時に `1152×1693 px` として領域・解像度指定が正しく反映されることを確認済み
 ```
