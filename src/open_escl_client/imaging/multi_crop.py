@@ -9,7 +9,7 @@ single-pass subpixel affine warping.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -1267,7 +1267,7 @@ class MultiDocumentDetector:
             groups.setdefault(find(idx), []).append(idx)
 
         work_gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
-        merged_pairs: list[tuple[RotatedCropBox, RotatedCropBox]] = []
+        raw_groups: list[RotatedCropBox] = []
 
         for member_indices in groups.values():
             all_pts = np.vstack([fragments[idx][1] for idx in member_indices])
@@ -1276,108 +1276,486 @@ class MultiDocumentDetector:
             if rw <= 0.0 or rh <= 0.0:
                 continue
 
-            raw_group = RotatedCropBox(
-                center_x=cx,
-                center_y=cy,
-                width=rw,
-                height=rh,
-                angle_deg=angle_deg,
-                confidence=0.85,
-                source_width=w,
-                source_height=h,
+            raw_groups.append(
+                RotatedCropBox(
+                    center_x=cx,
+                    center_y=cy,
+                    width=rw,
+                    height=rh,
+                    angle_deg=angle_deg,
+                    confidence=0.85,
+                    source_width=w,
+                    source_height=h,
+                )
             )
-            # Expand merged printed bounds to subtle physical paper-edge shadows (or clean padding).
-            expanded = self._expand_printed_group_to_paper_edges(work_gray, raw_group)
-            area_ratio = expanded.area / work_area
+
+        # Expand each printed group to faint physical paper-edge shadows and trace detected
+        # shadow lines tangentially to the sheet's true corners. Only guard against collisions
+        # with confirmed solid sheets so small sibling fragments on the same sheet (e.g. left
+        # label column vs right value column) never block tracing and can merge cleanly below.
+        expanded_groups: list[tuple[RotatedCropBox, RotatedCropBox]] = []
+        for raw_group in raw_groups:
+            expanded = self._expand_printed_group_to_paper_edges(
+                work_gray, raw_group, solid_boxes=solid_boxes
+            )
+            expanded_groups.append((raw_group, expanded))
+
+        # Re-merge expanded printed groups that now overlap (e.g. two columns under the same
+        # traced top shadow line) so sibling fragments unify into one complete sheet box.
+        merged_pairs = self._unify_overlapping_printed_groups(
+            expanded_groups,
+            work_w=w,
+            work_h=h,
+            work_area=work_area,
+            min_side_work=min_side_work,
+        )
+        return merged_pairs
+
+    def _unify_overlapping_printed_groups(
+        self,
+        group_pairs: list[tuple[RotatedCropBox, RotatedCropBox]],
+        *,
+        work_w: int,
+        work_h: int,
+        work_area: float,
+        min_side_work: float,
+    ) -> list[tuple[RotatedCropBox, RotatedCropBox]]:
+        """Unify expanded printed groups that overlap after shadow-line expansion."""
+        m = len(group_pairs)
+        if m == 0:
+            return []
+
+        parent = list(range(m))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i: int, j: int) -> None:
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        polys = [exp.corners() for _, exp in group_pairs]
+        areas = [max(1.0, exp.area) for _, exp in group_pairs]
+        for i in range(m):
+            for j in range(i + 1, m):
+                inter, _ = cv2.intersectConvexConvex(polys[i], polys[j])
+                if inter <= 0.0:
+                    continue
+                min_area = min(areas[i], areas[j])
+                if (inter / min_area) >= 0.25:
+                    union(i, j)
+
+        clusters: dict[int, list[int]] = {}
+        for idx in range(m):
+            clusters.setdefault(find(idx), []).append(idx)
+
+        result: list[tuple[RotatedCropBox, RotatedCropBox]] = []
+        for indices in clusters.values():
+            if len(indices) == 1:
+                raw_b, exp_b = group_pairs[indices[0]]
+            else:
+                # Preserve angle of the dominant group and enclose all member corners.
+                dominant_idx = max(indices, key=lambda k: group_pairs[k][1].area)
+                dom_angle = group_pairs[dominant_idx][1].angle_deg
+                raw_b = self._enclose_boxes_at_angle(
+                    [group_pairs[k][0] for k in indices],
+                    angle_deg=dom_angle,
+                    work_w=work_w,
+                    work_h=work_h,
+                )
+                exp_b = self._enclose_boxes_at_angle(
+                    [group_pairs[k][1] for k in indices],
+                    angle_deg=dom_angle,
+                    work_w=work_w,
+                    work_h=work_h,
+                )
+
+            area_ratio = exp_b.area / work_area
             if area_ratio < self.config.min_area_ratio or area_ratio > self.config.max_area_ratio:
                 continue
-            if min(expanded.width, expanded.height) < min_side_work:
+            if min(exp_b.width, exp_b.height) < min_side_work:
                 continue
-            merged_pairs.append((raw_group, expanded))
+            result.append((raw_b, exp_b))
+        return result
 
-        return merged_pairs
+    @staticmethod
+    def _enclose_boxes_at_angle(
+        boxes: Sequence[RotatedCropBox],
+        *,
+        angle_deg: float,
+        work_w: int,
+        work_h: int,
+    ) -> RotatedCropBox:
+        """Build the tightest `RotatedCropBox` at `angle_deg` enclosing all `boxes`."""
+        pts = np.vstack([b.corners() for b in boxes])
+        rad = math.radians(angle_deg)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        # Project corners into the frame rotated by `angle_deg`.
+        u = pts[:, 0] * cos_a + pts[:, 1] * sin_a
+        v = -pts[:, 0] * sin_a + pts[:, 1] * cos_a
+        u_min, u_max = float(np.min(u)), float(np.max(u))
+        v_min, v_max = float(np.min(v)), float(np.max(v))
+
+        uc = (u_min + u_max) * 0.5
+        vc = (v_min + v_max) * 0.5
+        cx = uc * cos_a - vc * sin_a
+        cy = uc * sin_a + vc * cos_a
+
+        return RotatedCropBox(
+            center_x=cx,
+            center_y=cy,
+            width=min(float(work_w), max(1.0, u_max - u_min)),
+            height=min(float(work_h), max(1.0, v_max - v_min)),
+            angle_deg=angle_deg,
+            confidence=0.85,
+            source_width=work_w,
+            source_height=work_h,
+        )
 
     @staticmethod
     def _expand_printed_group_to_paper_edges(
         work_gray: np.ndarray,
         box: RotatedCropBox,
+        *,
+        solid_boxes: Sequence[RotatedCropBox] = (),
     ) -> RotatedCropBox:
-        """Snap a printed-fragment bounding box outward to faint paper edges or natural margins."""
+        """Snap a printed-fragment box outward to faint paper edges and trace shadow lines."""
         h, w = work_gray.shape[:2]
         max_dim = float(max(h, w))
         short_side = min(box.width, box.height)
-        max_search = int(round(max(12.0, min(short_side * 0.30, max_dim * 0.055))))
-        default_pad = max(6.0, min(short_side * 0.09, max_dim * 0.018))
+        long_side = max(box.width, box.height)
 
-        bx, by, bw, bh = box.bounding_rect()
-        x1 = max(0, int(round(bx)))
-        y1 = max(0, int(round(by)))
-        x2 = min(w - 1, int(round(bx + bw)))
-        y2 = min(h - 1, int(round(by + bh)))
-        if x2 <= x1 + 4 or y2 <= y1 + 4:
+        # Physical paper margins (e.g. 10-18mm top header margin above a title) do not shrink
+        # when a slip is partially clipped by the scan region, so keep `max_normal` generous
+        # relative to image scale while guarding against adjacent solid boxes.
+        max_normal = int(round(max(48.0, min(max(short_side * 0.9, 52.0), max_dim * 0.085))))
+        max_tangent = int(round(max(60.0, min(max(long_side * 1.1, 140.0), max_dim * 0.25))))
+        default_pad = max(4.0, min(short_side * 0.045, max_dim * 0.009))
+
+        if box.width < 4.0 or box.height < 4.0:
             return box
 
-        def find_edge_offset(profile: np.ndarray) -> float | None:
-            if profile.size < 4:
+        # Build a single deskewed local patch aligned with `box.angle_deg` so tangential edge
+        # tracing works identically on upright and arbitrarily tilted documents.
+        pad_x = max(max_normal, max_tangent) + 12
+        pad_y = max(max_normal, max_tangent) + 12
+        patch_w = int(round(box.width)) + pad_x * 2
+        patch_h = int(round(box.height)) + pad_y * 2
+
+        rot_mat = cv2.getRotationMatrix2D((box.center_x, box.center_y), box.angle_deg, 1.0)
+        rot_mat[0, 2] += (patch_w * 0.5) - box.center_x
+        rot_mat[1, 2] += (patch_h * 0.5) - box.center_y
+        inv_mat = cv2.invertAffineTransform(rot_mat)
+
+        bg_fill = int(round(float(np.percentile(work_gray, 95))))
+        patch = cv2.warpAffine(
+            work_gray,
+            rot_mat,
+            (patch_w, patch_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=bg_fill,
+        ).astype(np.float32)
+
+        x1 = int(round(pad_x))
+        y1 = int(round(pad_y))
+        x2 = int(round(pad_x + box.width))
+        y2 = int(round(pad_y + box.height))
+
+        solid_rects = [b.bounding_rect() for b in solid_boxes]
+        collision_margin = 6.0
+
+        def local_point_valid(lx: float, ly: float) -> bool:
+            src_x = inv_mat[0, 0] * lx + inv_mat[0, 1] * ly + inv_mat[0, 2]
+            src_y = inv_mat[1, 0] * lx + inv_mat[1, 1] * ly + inv_mat[1, 2]
+            if src_x < 2.0 or src_x > (w - 3.0) or src_y < 2.0 or src_y > (h - 3.0):
+                return False
+            for ox, oy, ow, oh in solid_rects:
+                if (
+                    (ox - collision_margin) <= src_x <= (ox + ow + collision_margin)
+                    and (oy - collision_margin) <= src_y <= (oy + oh + collision_margin)
+                ):
+                    return False
+            return True
+
+        def find_normal_edge(
+            profile: np.ndarray,
+            *,
+            inner_profile: np.ndarray,
+            check_valid: Callable[[int], bool],
+        ) -> float | None:
+            if profile.size < 6:
                 return None
-            # Look for a subtle paper-edge drop shadow line (local darkening >= 4.0 gray levels
-            # or clear gradient jump >= 3.5) outside the printed ink bounds.
-            baseline = float(np.percentile(profile, 80))
-            drops = baseline - profile
-            grad = np.abs(np.diff(profile))
-            best_pos: int | None = None
-            best_strength = 0.0
-            for idx in range(2, len(profile) - 1):
-                drop = float(drops[idx])
-                g = float(grad[idx - 1])
-                strength = max(drop, g * 1.1)
-                if drop >= 4.0 or g >= 3.5:
-                    if strength > best_strength:
-                        best_strength = strength
-                        best_pos = idx
-            if best_pos is None:
-                return None
-            return float(best_pos)
+            # 1) Check whether a crisp physical paper-edge shadow line was already absorbed
+            #    into the raw foreground contour (sitting right on the boundary or a few pixels
+            #    inside due to morphological closing). In that case, snap directly to that line
+            #    (0 or small negative offset) instead of pushing further out with `default_pad`.
+            baseline = float(np.percentile(profile, 85))
+            if inner_profile.size >= 8:
+                outer_clean = float(np.min(profile[: min(5, profile.size)])) >= (baseline - 3.5)
+                if outer_clean:
+                    max_in = min(14, inner_profile.size - 4)
+                    for k in range(0, max_in):
+                        # Everything between the raw boundary and `k` must be blank white.
+                        if k > 0 and float(np.min(inner_profile[:k])) < (baseline - 4.0):
+                            break
+                        val_k = float(inner_profile[k])
+                        drop_k = baseline - val_k
+                        if drop_k < 4.0:
+                            continue
+                        # Confirm it is a thin shadow valley with white paper margin behind it
+                        # (not a solid printed banner or dense text).
+                        behind = inner_profile[k + 2 : min(inner_profile.size, k + 7)]
+                        if behind.size < 2:
+                            continue
+                        behind_white = float(np.max(behind))
+                        if (
+                            behind_white >= (baseline - 5.0)
+                            and (behind_white - val_k) >= 3.0
+                        ):
+                            return -float(k)
 
-        # Sample outward mean intensity profiles along the 4 sides.
-        # Left (going outward toward 0)
-        l_start = max(0, x1 - max_search)
-        l_prof = (
-            np.mean(work_gray[y1 : y2 + 1, l_start : x1 + 1], axis=0)[::-1]
-            if x1 > l_start
-            else np.array([], dtype=np.float32)
+            # 2) Otherwise scan outward for a thin paper-edge shadow valley (dark dip flanked on
+            #    both inner and outer sides by bright white paper/platen).
+            best_valley_pos: int | None = None
+            best_valley_score = 0.0
+            best_fallback_pos: int | None = None
+            best_fallback_score = 0.0
+
+            for idx in range(3, len(profile) - 2):
+                if not check_valid(idx):
+                    break
+                val = float(profile[idx])
+                drop = baseline - val
+                if drop < 3.0:
+                    continue
+
+                # Check inner and outer flanks 2-4px away to confirm a thin shadow line.
+                in_hi = max(0, idx - 2)
+                in_lo = max(0, idx - 5)
+                out_lo = min(len(profile), idx + 2)
+                out_hi = min(len(profile), idx + 6)
+                in_flank = float(np.max(profile[in_lo : in_hi + 1])) if in_hi >= in_lo else baseline
+                out_flank = (
+                    float(np.max(profile[out_lo:out_hi])) if out_hi > out_lo else baseline
+                )
+                valley_depth = min(in_flank - val, out_flank - val)
+
+                # Stop scanning outward if we hit a dense dark object (another document).
+                if baseline - out_flank >= 20.0:
+                    break
+
+                if valley_depth >= 2.5 and drop >= 3.5:
+                    if valley_depth > best_valley_score:
+                        best_valley_score = valley_depth
+                        best_valley_pos = idx
+                elif drop >= 4.0:
+                    if drop > best_fallback_score:
+                        best_fallback_score = drop
+                        best_fallback_pos = idx
+
+            if best_valley_pos is not None:
+                return float(best_valley_pos)
+            return float(best_fallback_pos) if best_fallback_pos is not None else None
+
+        # Step 1: Normal outward edge search on all 4 sides in the deskewed local patch.
+        l_prof = np.mean(patch[y1 : y2 + 1, max(0, x1 - max_normal) : x1 + 1], axis=0)[::-1]
+        r_prof = np.mean(patch[y1 : y2 + 1, x2 : min(patch_w, x2 + max_normal + 1)], axis=0)
+        t_prof = np.mean(patch[max(0, y1 - max_normal) : y1 + 1, x1 : x2 + 1], axis=1)[::-1]
+        b_prof = np.mean(patch[y2 : min(patch_h, y2 + max_normal + 1), x1 : x2 + 1], axis=1)
+
+        in_depth = 20
+        l_in = np.mean(patch[y1 : y2 + 1, x1 : min(patch_w, x1 + in_depth)], axis=0)
+        r_in = np.mean(patch[y1 : y2 + 1, max(0, x2 - in_depth + 1) : x2 + 1], axis=0)[::-1]
+        t_in = np.mean(patch[y1 : min(patch_h, y1 + in_depth), x1 : x2 + 1], axis=1)
+        b_in = np.mean(patch[max(0, y2 - in_depth + 1) : y2 + 1, x1 : x2 + 1], axis=1)[::-1]
+
+        mid_x = (x1 + x2) * 0.5
+        mid_y = (y1 + y2) * 0.5
+        off_l = find_normal_edge(
+            l_prof,
+            inner_profile=l_in,
+            check_valid=lambda d: local_point_valid(float(x1 - d), mid_y),
         )
-        # Right (going outward toward w-1)
-        r_end = min(w, x2 + max_search + 1)
-        r_prof = (
-            np.mean(work_gray[y1 : y2 + 1, x2:r_end], axis=0)
-            if r_end > x2 + 1
-            else np.array([], dtype=np.float32)
+        off_r = find_normal_edge(
+            r_prof,
+            inner_profile=r_in,
+            check_valid=lambda d: local_point_valid(float(x2 + d), mid_y),
         )
-        # Top (going outward toward 0)
-        t_start = max(0, y1 - max_search)
-        t_prof = (
-            np.mean(work_gray[t_start : y1 + 1, x1 : x2 + 1], axis=1)[::-1]
-            if y1 > t_start
-            else np.array([], dtype=np.float32)
+        off_t = find_normal_edge(
+            t_prof,
+            inner_profile=t_in,
+            check_valid=lambda d: local_point_valid(mid_x, float(y1 - d)),
         )
-        # Bottom (going outward toward h-1)
-        b_end = min(h, y2 + max_search + 1)
-        b_prof = (
-            np.mean(work_gray[y2:b_end, x1 : x2 + 1], axis=1)
-            if b_end > y2 + 1
-            else np.array([], dtype=np.float32)
+        off_b = find_normal_edge(
+            b_prof,
+            inner_profile=b_in,
+            check_valid=lambda d: local_point_valid(mid_x, float(y2 + d)),
         )
 
-        off_l = find_edge_offset(l_prof)
-        off_r = find_edge_offset(r_prof)
-        off_t = find_edge_offset(t_prof)
-        off_b = find_edge_offset(b_prof)
+        pad_l = off_l if off_l is not None else default_pad
+        pad_r = off_r if off_r is not None else default_pad
+        pad_t = off_t if off_t is not None else default_pad
+        pad_b = off_b if off_b is not None else default_pad
 
-        pad_l = min(float(x1), off_l if off_l is not None else default_pad)
-        pad_r = min(float(w - 1 - x2), off_r if off_r is not None else default_pad)
-        pad_t = min(float(y1), off_t if off_t is not None else default_pad)
-        pad_b = min(float(h - 1 - y2), off_b if off_b is not None else default_pad)
+        # Step 2: Tangential edge-line span tracing.
+        # Verify the detected normal edge is a genuine continuous thin shadow along the current
+        # side (>= 45% coverage), then trace it outward to the sheet's physical corners.
+        max_gap_px = max(12, int(round(max_dim * 0.016)))
+        shadow_drop_thresh = 4.0
+
+        def has_horizontal_shadow_support(edge_y: float) -> bool:
+            yi = int(round(edge_y))
+            if yi < 6 or yi >= patch_h - 6 or x2 <= x1 + 8:
+                return False
+            strip = np.min(patch[yi - 2 : yi + 3, x1 : x2 + 1], axis=0)
+            above = float(np.median(patch[yi - 6 : yi - 3, x1 : x2 + 1]))
+            below = float(np.median(patch[yi + 4 : yi + 7, x1 : x2 + 1]))
+            local_bg = max(above, below)
+            hits = np.count_nonzero((local_bg - strip) >= shadow_drop_thresh)
+            return (float(hits) / float(strip.size)) >= 0.45
+
+        def has_vertical_shadow_support(edge_x: float) -> bool:
+            xi = int(round(edge_x))
+            if xi < 6 or xi >= patch_w - 6 or y2 <= y1 + 8:
+                return False
+            strip = np.min(patch[y1 : y2 + 1, xi - 2 : xi + 3], axis=1)
+            left_med = float(np.median(patch[y1 : y2 + 1, xi - 6 : xi - 3]))
+            right_med = float(np.median(patch[y1 : y2 + 1, xi + 4 : xi + 7]))
+            local_bg = max(left_med, right_med)
+            hits = np.count_nonzero((local_bg - strip) >= shadow_drop_thresh)
+            return (float(hits) / float(strip.size)) >= 0.45
+
+        def trace_horizontal_edge(edge_y: float, start_x: int, step: int, outward_dy: int) -> float:
+            """Trace a horizontal shadow line outward from `start_x` in direction `step` (±1)."""
+            cur_y = float(edge_y)
+            y_min_bound = max(6.0, edge_y - 5.0)
+            y_max_bound = min(float(patch_h - 7), edge_y + 5.0)
+            last_hit_dist = 0
+            gap = 0
+            for dist in range(1, max_tangent + 1):
+                tx = start_x + step * dist
+                if tx < 2 or tx >= patch_w - 2:
+                    break
+                if not local_point_valid(float(tx), cur_y):
+                    break
+
+                yi = int(round(cur_y))
+                band = patch[max(0, yi - 2) : min(patch_h, yi + 3), tx]
+                if band.size == 0:
+                    break
+                min_idx = int(np.argmin(band))
+                line_val = float(band[min_idx])
+
+                out_y0 = max(0, min(patch_h - 1, yi + outward_dy * 4))
+                out_y1 = max(0, min(patch_h - 1, yi + outward_dy * 6))
+                in_y0 = max(0, min(patch_h - 1, yi - outward_dy * 4))
+                in_y1 = max(0, min(patch_h - 1, yi - outward_dy * 6))
+                out_lo, out_hi = min(out_y0, out_y1), max(out_y0, out_y1) + 1
+                in_lo, in_hi = min(in_y0, in_y1), max(in_y0, in_y1) + 1
+                out_med = float(np.median(patch[out_lo:out_hi, tx]))
+                in_med = float(np.median(patch[in_lo:in_hi, tx]))
+                local_bg = max(out_med, in_med)
+
+                # Stop if the outer flank itself turns dark (entering another document).
+                if local_bg - out_med >= 18.0:
+                    break
+
+                if local_bg - line_val >= shadow_drop_thresh:
+                    last_hit_dist = dist
+                    gap = 0
+                    target_y = float(max(0, yi - 2) + min_idx)
+                    step_y = float(np.clip(target_y - cur_y, -0.35, 0.35))
+                    cur_y = float(np.clip(cur_y + step_y, y_min_bound, y_max_bound))
+                else:
+                    gap += 1
+                    if gap > max_gap_px:
+                        break
+            return float(last_hit_dist)
+
+        def trace_vertical_edge(edge_x: float, start_y: int, step: int, outward_dx: int) -> float:
+            """Trace a vertical shadow line outward from `start_y` in direction `step` (±1)."""
+            cur_x = float(edge_x)
+            x_min_bound = max(6.0, edge_x - 5.0)
+            x_max_bound = min(float(patch_w - 7), edge_x + 5.0)
+            last_hit_dist = 0
+            gap = 0
+            for dist in range(1, max_tangent + 1):
+                ty = start_y + step * dist
+                if ty < 2 or ty >= patch_h - 2:
+                    break
+                if not local_point_valid(cur_x, float(ty)):
+                    break
+
+                xi = int(round(cur_x))
+                band = patch[ty, max(0, xi - 2) : min(patch_w, xi + 3)]
+                if band.size == 0:
+                    break
+                min_idx = int(np.argmin(band))
+                line_val = float(band[min_idx])
+
+                out_x0 = max(0, min(patch_w - 1, xi + outward_dx * 4))
+                out_x1 = max(0, min(patch_w - 1, xi + outward_dx * 6))
+                in_x0 = max(0, min(patch_w - 1, xi - outward_dx * 4))
+                in_x1 = max(0, min(patch_w - 1, xi - outward_dx * 6))
+                out_lo, out_hi = min(out_x0, out_x1), max(out_x0, out_x1) + 1
+                in_lo, in_hi = min(in_x0, in_x1), max(in_x0, in_x1) + 1
+                out_med = float(np.median(patch[ty, out_lo:out_hi]))
+                in_med = float(np.median(patch[ty, in_lo:in_hi]))
+                local_bg = max(out_med, in_med)
+
+                if local_bg - out_med >= 18.0:
+                    break
+
+                if local_bg - line_val >= shadow_drop_thresh:
+                    last_hit_dist = dist
+                    gap = 0
+                    target_x = float(max(0, xi - 2) + min_idx)
+                    step_x = float(np.clip(target_x - cur_x, -0.35, 0.35))
+                    cur_x = float(np.clip(cur_x + step_x, x_min_bound, x_max_bound))
+                else:
+                    gap += 1
+                    if gap > max_gap_px:
+                        break
+            return float(last_hit_dist)
+
+        if off_t is not None:
+            edge_y_top = float(y1) - off_t
+            if has_horizontal_shadow_support(edge_y_top):
+                pad_l = max(pad_l, trace_horizontal_edge(edge_y_top, x1, -1, outward_dy=-1))
+                pad_r = max(pad_r, trace_horizontal_edge(edge_y_top, x2, 1, outward_dy=-1))
+        if off_b is not None:
+            edge_y_bot = float(y2) + off_b
+            if has_horizontal_shadow_support(edge_y_bot):
+                pad_l = max(pad_l, trace_horizontal_edge(edge_y_bot, x1, -1, outward_dy=1))
+                pad_r = max(pad_r, trace_horizontal_edge(edge_y_bot, x2, 1, outward_dy=1))
+        if off_l is not None:
+            edge_x_left = float(x1) - off_l
+            if has_vertical_shadow_support(edge_x_left):
+                if off_t is None:
+                    pad_t = max(pad_t, trace_vertical_edge(edge_x_left, y1, -1, outward_dx=-1))
+                if off_b is None:
+                    pad_b = max(pad_b, trace_vertical_edge(edge_x_left, y2, 1, outward_dx=-1))
+        if off_r is not None:
+            edge_x_right = float(x2) + off_r
+            if has_vertical_shadow_support(edge_x_right):
+                if off_t is None:
+                    pad_t = max(pad_t, trace_vertical_edge(edge_x_right, y1, -1, outward_dx=1))
+                if off_b is None:
+                    pad_b = max(pad_b, trace_vertical_edge(edge_x_right, y2, 1, outward_dx=1))
+
+        # Clamp final paddings to stay strictly within source image boundaries.
+        bx, by, bw, bh = box.bounding_rect()
+        pad_l = min(pad_l, max(0.0, bx))
+        pad_r = min(pad_r, max(0.0, float(w - 1) - (bx + bw)))
+        pad_t = min(pad_t, max(0.0, by))
+        pad_b = min(pad_b, max(0.0, float(h - 1) - (by + bh)))
 
         eff_cx, eff_cy, eff_w, eff_h, eff_angle = box.with_edge_margins(
             top=pad_t, right=pad_r, bottom=pad_b, left=pad_l, unit="px"

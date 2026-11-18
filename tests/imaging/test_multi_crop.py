@@ -534,3 +534,97 @@ def test_sideways_white_receipt_fragments_merge_along_horizontal_axis() -> None:
     assert 430.0 <= box.width <= 560.0
     assert 130.0 <= box.height <= 220.0
 
+
+def test_tangential_shadow_edge_tracing_expands_white_slip_to_physical_width() -> None:
+    """Faint top shadow line past printed text expands box to true physical sheet width."""
+    canvas = np.full((800, 1000, 3), (254, 254, 254), dtype=np.uint8)
+
+    # Physical white guarantee slip: x=[240..560] (width=320), y=[320..460] (height=140).
+    # Printed text occupies only the inner x=[295..505] (width=210), leaving 55px white margins.
+    slip_x1, slip_x2, slip_y1 = 240, 560, 320
+    # Subtle top-edge shadow line with a small 4px fade gap to test gap tolerance.
+    cv2.line(canvas, (slip_x1, slip_y1), (360, slip_y1), (228, 228, 228), thickness=2)
+    cv2.line(canvas, (365, slip_y1), (slip_x2, slip_y1), (228, 228, 228), thickness=2)
+
+    # Printed heading & body strictly inside [295..505]
+    cv2.rectangle(canvas, (355, 342), (445, 362), (35, 35, 35), thickness=-1)
+    for dy in (378, 396, 414, 432):
+        cv2.rectangle(canvas, (295, dy), (505, dy + 6), (45, 45, 45), thickness=-1)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 1
+    box = boxes[0]
+    # Must trace the top shadow line out to the physical width (~320px), not stop at ~210px.
+    assert 304.0 <= box.width <= 336.0
+    assert abs(box.center_x - 400.0) <= 12.0
+
+
+def test_tangential_shadow_tracing_unifies_separated_label_and_value_columns() -> None:
+    """Separated left label column and right heading/value column unify under shared shadow."""
+    canvas = np.full((760, 620, 3), (254, 254, 254), dtype=np.uint8)
+
+    # Top shadow line spanning x=[180..480] (width=300) at y=620 (34px above heading,
+    # mirroring 100 DPI real-device header margin when bottom of slip is clipped).
+    cv2.line(canvas, (180, 620), (480, 620), (226, 226, 226), thickness=2)
+    # Right heading + value block (x=[300..420], height ~72px)
+    cv2.rectangle(canvas, (315, 654), (405, 676), (35, 35, 35), thickness=-1)
+    cv2.rectangle(canvas, (302, 692), (420, 704), (45, 45, 45), thickness=-1)
+    cv2.rectangle(canvas, (302, 714), (420, 726), (45, 45, 45), thickness=-1)
+    # Separated left label column (x=[225..265], 37px gap to right column)
+    cv2.rectangle(canvas, (225, 692), (265, 704), (45, 45, 45), thickness=-1)
+    cv2.rectangle(canvas, (225, 714), (265, 726), (45, 45, 45), thickness=-1)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 1
+    box = boxes[0]
+    bx, _, bw, _ = box.bounding_rect()
+    # Both the left label column (x=225) and the full traced width (~300px) must be included.
+    assert bx <= 200.0
+    assert (bx + bw) >= 460.0
+
+
+def test_tangential_shadow_tracing_stops_before_adjacent_document() -> None:
+    """Shadow tracing must not cross into an adjacent document box."""
+    canvas = np.full((800, 1000, 3), (254, 254, 254), dtype=np.uint8)
+
+    # White slip on left with faint top shadow line extending toward a nearby colored card.
+    cv2.line(canvas, (140, 320), (452, 320), (232, 232, 232), thickness=2)
+    cv2.rectangle(canvas, (200, 345), (360, 440), (40, 40, 40), thickness=3)
+    for dy in (365, 390, 415):
+        cv2.line(canvas, (210, dy), (350, dy), (40, 40, 40), thickness=2)
+
+    # Colored card nearby to the right at x=[470..670]
+    cv2.rectangle(canvas, (470, 260), (670, 500), (220, 185, 145), thickness=-1)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 2
+    left_box = min(boxes, key=lambda b: b.center_x)
+    lx, _, lw, _ = left_box.bounding_rect()
+    # Right edge of left box must stop before colliding into the colored card at x=470.
+    assert (lx + lw) <= 470.0
+
+
+def test_absorbed_top_shadow_line_snaps_tightly_without_overshoot() -> None:
+    """When a strong paper-edge shadow line is absorbed into the raw contour, snap onto it."""
+    canvas = np.full((900, 1100, 3), (254, 254, 254), dtype=np.uint8)
+
+    # Horizontal receipt with crisp top shadow line at y=350 (gray=185) and printed text y=362..520.
+    cv2.line(canvas, (180, 350), (880, 350), (185, 185, 185), thickness=2)
+    for x in range(200, 860, 45):
+        cv2.rectangle(canvas, (x, 366), (x + 28, 520), (40, 40, 40), thickness=-1)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 1
+    _, by, _, bh = boxes[0].bounding_rect()
+    # Top edge must sit closely on the crisp shadow line y=350 (not overshoot upward to ~335).
+    assert 346.0 <= by <= 354.0
+    assert (by + bh) <= 536.0
+
