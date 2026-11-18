@@ -28,27 +28,18 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import cv2
 import numpy as np
 
-from open_escl_client.imaging.multi_crop import decode_image_bytes
+from open_escl_client.imaging.multi_crop import (
+    RotationDeg,
+    decode_image_bytes,
+    normalize_rotation_cw,
+)
 
-RotationDeg = Literal[0, 90, 180, 270]
 VALID_ROTATIONS: tuple[RotationDeg, ...] = (0, 90, 180, 270)
-
-
-def normalize_rotation_cw(angle_deg: int) -> RotationDeg:
-    """Normalize an arbitrary integer degree angle to the nearest 90° CW step."""
-    snapped = int(round(angle_deg / 90.0) * 90) % 360
-    if snapped == 90:
-        return 90
-    if snapped == 180:
-        return 180
-    if snapped == 270:
-        return 270
-    return 0
 
 
 def rotate_image_cw(image: np.ndarray, rotation_cw_deg: int) -> np.ndarray:

@@ -9,13 +9,46 @@ single-pass subpixel affine warping.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import cv2
 import numpy as np
 
 BackgroundMode = Literal["auto", "light", "dark"]
+RotationDeg = Literal[0, 90, 180, 270]
+MarginUnit = Literal["mm", "px"]
+EdgeName = Literal["top", "right", "bottom", "left"]
+
+MM_PER_INCH = 25.4
+MIN_CROP_SIDE_PX = 4.0
+
+
+def mm_to_px(mm: float, dpi: float) -> float:
+    """Convert millimeters to pixels at the given DPI."""
+    if dpi <= 0.0:
+        raise ValueError(f"dpi must be positive, got {dpi}")
+    return float(mm) * float(dpi) / MM_PER_INCH
+
+
+def px_to_mm(px: float, dpi: float) -> float:
+    """Convert pixels to millimeters at the given DPI."""
+    if dpi <= 0.0:
+        raise ValueError(f"dpi must be positive, got {dpi}")
+    return float(px) * MM_PER_INCH / float(dpi)
+
+
+def normalize_rotation_cw(angle_deg: int) -> RotationDeg:
+    """Normalize an arbitrary integer degree angle to the nearest 90° CW step."""
+    snapped = int(round(angle_deg / 90.0) * 90) % 360
+    if snapped == 90:
+        return 90
+    if snapped == 180:
+        return 180
+    if snapped == 270:
+        return 270
+    return 0
 
 
 def decode_image_bytes(image_bytes: bytes) -> np.ndarray:
@@ -98,6 +131,114 @@ def _normalize_min_area_rect(
 
 
 @dataclass(frozen=True, slots=True)
+class CropMarginOffsets:
+    """Per-edge margin adjustments for a crop box.
+
+    Positive values expand the crop outward (adding margin); negative values trim
+    inward (removing faint borders or edge shadows).
+    """
+
+    top: float = 0.0
+    right: float = 0.0
+    bottom: float = 0.0
+    left: float = 0.0
+    unit: MarginUnit = "mm"
+
+    @classmethod
+    def uniform(cls, value: float, unit: MarginUnit = "mm") -> CropMarginOffsets:
+        v = float(value)
+        return cls(top=v, right=v, bottom=v, left=v, unit=unit)
+
+    @property
+    def is_zero(self) -> bool:
+        return (
+            abs(self.top) < 1e-9
+            and abs(self.right) < 1e-9
+            and abs(self.bottom) < 1e-9
+            and abs(self.left) < 1e-9
+        )
+
+    def to_pixels(self, dpi: float) -> CropMarginOffsets:
+        """Convert this margin specification into pixel units."""
+        if self.unit == "px":
+            return self
+        if self.is_zero:
+            return CropMarginOffsets(unit="px")
+        return CropMarginOffsets(
+            top=mm_to_px(self.top, dpi),
+            right=mm_to_px(self.right, dpi),
+            bottom=mm_to_px(self.bottom, dpi),
+            left=mm_to_px(self.left, dpi),
+            unit="px",
+        )
+
+    def to_millimeters(self, dpi: float) -> CropMarginOffsets:
+        """Convert this margin specification into millimeter units."""
+        if self.unit == "mm":
+            return self
+        if self.is_zero:
+            return CropMarginOffsets(unit="mm")
+        return CropMarginOffsets(
+            top=px_to_mm(self.top, dpi),
+            right=px_to_mm(self.right, dpi),
+            bottom=px_to_mm(self.bottom, dpi),
+            left=px_to_mm(self.left, dpi),
+            unit="mm",
+        )
+
+    def scaled(self, scale_x: float, scale_y: float | None = None) -> CropMarginOffsets:
+        """Scale pixel offsets by resolution ratio; physical mm offsets stay unchanged."""
+        if self.unit == "mm":
+            return self
+        sy = scale_x if scale_y is None else scale_y
+        return CropMarginOffsets(
+            top=self.top * sy,
+            right=self.right * scale_x,
+            bottom=self.bottom * sy,
+            left=self.left * scale_x,
+            unit="px",
+        )
+
+
+def _clamp_axis_margins(
+    size: float,
+    neg_side: float,
+    pos_side: float,
+    min_size: float,
+) -> tuple[float, float, float]:
+    """Apply signed margins on one axis while ensuring resulting size >= `min_size`.
+
+    Args:
+        size: Base dimension along the axis.
+        neg_side: Margin on the negative side (`left` or `top`); positive expands.
+        pos_side: Margin on the positive side (`right` or `bottom`); positive expands.
+        min_size: Minimum allowable resulting dimension.
+
+    Returns:
+        `(new_size, effective_neg_side, effective_pos_side)`
+    """
+    base = max(float(size), float(min_size))
+    n = float(neg_side)
+    p = float(pos_side)
+    new_size = base + n + p
+    if new_size >= min_size:
+        return new_size, n, p
+
+    # Clamp negative trims proportionally so the box never collapses or inverts.
+    deficit = min_size - new_size
+    neg_trim = max(0.0, -n)
+    pos_trim = max(0.0, -p)
+    total_trim = neg_trim + pos_trim
+    if total_trim <= 1e-9:
+        return min_size, n, p
+
+    reduce_ratio = min(1.0, deficit / total_trim)
+    eff_n = n + neg_trim * reduce_ratio
+    eff_p = p + pos_trim * reduce_ratio
+    return max(min_size, base + eff_n + eff_p), eff_n, eff_p
+
+
+@dataclass(frozen=True, slots=True)
 class RotatedCropBox:
     """Axis-aligned rectangle rotated by `angle_deg` clockwise in image coordinates.
 
@@ -113,6 +254,12 @@ class RotatedCropBox:
         index: 1-based reading order index assigned by the detector (0 if unassigned).
         source_width: Width of the image in which coordinates are expressed.
         source_height: Height of the image in which coordinates are expressed.
+        margin_mm: Per-edge margin offsets in millimeters (applied via `dpi`).
+        margin_px: Per-edge margin offsets in source image pixels.
+        manual_angle_offset_deg: User fine-angle adjustment added to `angle_deg`.
+        auto_rotation_cw_deg: Automatically detected upright rotation (0/90/180/270).
+        manual_rotation_cw_deg: User manual 90°-step rotation override (or None).
+        source_dpi: DPI of the image in which this box was detected/adjusted (0 if unknown).
     """
 
     center_x: float
@@ -124,16 +271,230 @@ class RotatedCropBox:
     index: int = 0
     source_width: int = 0
     source_height: int = 0
+    margin_mm: CropMarginOffsets = field(default_factory=lambda: CropMarginOffsets(unit="mm"))
+    margin_px: CropMarginOffsets = field(default_factory=lambda: CropMarginOffsets(unit="px"))
+    manual_angle_offset_deg: float = 0.0
+    auto_rotation_cw_deg: RotationDeg = 0
+    manual_rotation_cw_deg: RotationDeg | None = None
+    source_dpi: float = 0.0
 
     @property
     def area(self) -> float:
         return max(0.0, self.width) * max(0.0, self.height)
 
-    def corners(self) -> np.ndarray:
-        """Return the 4 corners as a `(4, 2)` float32 array in TL, TR, BR, BL order."""
-        half_w = self.width * 0.5
-        half_h = self.height * 0.5
-        rad = math.radians(self.angle_deg)
+    @property
+    def effective_angle_deg(self) -> float:
+        """Total clockwise fine-skew angle combining detected angle and manual tweak."""
+        return float(self.angle_deg) + float(self.manual_angle_offset_deg)
+
+    @property
+    def effective_rotation_cw_deg(self) -> RotationDeg:
+        """Final 90°-step CW rotation to apply (manual override wins over auto)."""
+        if self.manual_rotation_cw_deg is not None:
+            return normalize_rotation_cw(self.manual_rotation_cw_deg)
+        return normalize_rotation_cw(self.auto_rotation_cw_deg)
+
+    def resolved_geometry(
+        self,
+        dpi: float | None = None,
+        *,
+        min_size_px: float = MIN_CROP_SIDE_PX,
+    ) -> tuple[float, float, float, float, float]:
+        """Resolve `(center_x, center_y, width, height, effective_angle_deg)` with margins.
+
+        Applies both `margin_mm` (converted via `dpi` or `self.source_dpi`) and `margin_px`,
+        shifting the center along the rotated local axes for asymmetric edge offsets and
+        clamping dimensions to at least `min_size_px`.
+        """
+        eff_dpi = self.source_dpi if dpi is None else float(dpi)
+        mm_as_px = (
+            self.margin_mm.to_pixels(eff_dpi)
+            if (not self.margin_mm.is_zero and eff_dpi > 0.0)
+            else CropMarginOffsets(unit="px")
+        )
+        px_m = (
+            self.margin_px
+            if self.margin_px.unit == "px"
+            else (
+                self.margin_px.to_pixels(eff_dpi)
+                if eff_dpi > 0.0
+                else CropMarginOffsets(unit="px")
+            )
+        )
+
+        total_top = mm_as_px.top + px_m.top
+        total_right = mm_as_px.right + px_m.right
+        total_bottom = mm_as_px.bottom + px_m.bottom
+        total_left = mm_as_px.left + px_m.left
+
+        eff_w, eff_left, eff_right = _clamp_axis_margins(
+            self.width, total_left, total_right, min_size_px
+        )
+        eff_h, eff_top, eff_bottom = _clamp_axis_margins(
+            self.height, total_top, total_bottom, min_size_px
+        )
+
+        eff_angle = self.effective_angle_deg
+        rad = math.radians(eff_angle)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        # Asymmetric edge adjustments shift the center in the box's local frame.
+        local_dx = (eff_right - eff_left) * 0.5
+        local_dy = (eff_bottom - eff_top) * 0.5
+        eff_cx = self.center_x + local_dx * cos_a - local_dy * sin_a
+        eff_cy = self.center_y + local_dx * sin_a + local_dy * cos_a
+        return float(eff_cx), float(eff_cy), float(eff_w), float(eff_h), float(eff_angle)
+
+    def with_uniform_margin(
+        self,
+        offset: float,
+        *,
+        unit: MarginUnit = "mm",
+    ) -> RotatedCropBox:
+        """Return a copy with uniform margin offset applied to all 4 edges."""
+        margins = CropMarginOffsets.uniform(offset, unit=unit)
+        if unit == "mm":
+            return replace(self, margin_mm=margins)
+        return replace(self, margin_px=margins)
+
+    def with_edge_margins(
+        self,
+        *,
+        top: float | None = None,
+        right: float | None = None,
+        bottom: float | None = None,
+        left: float | None = None,
+        unit: MarginUnit = "mm",
+    ) -> RotatedCropBox:
+        """Return a copy updating individual edge margin offsets in mm or px."""
+        base = self.margin_mm if unit == "mm" else self.margin_px
+        updated = CropMarginOffsets(
+            top=base.top if top is None else float(top),
+            right=base.right if right is None else float(right),
+            bottom=base.bottom if bottom is None else float(bottom),
+            left=base.left if left is None else float(left),
+            unit=unit,
+        )
+        if unit == "mm":
+            return replace(self, margin_mm=updated)
+        return replace(self, margin_px=updated)
+
+    def with_position_offset(self, dx: float, dy: float) -> RotatedCropBox:
+        """Return a copy translated by `(dx, dy)` in source image pixels."""
+        return replace(
+            self,
+            center_x=self.center_x + float(dx),
+            center_y=self.center_y + float(dy),
+        )
+
+    def with_edge_drag(self, edge: EdgeName, delta_px: float) -> RotatedCropBox:
+        """Adjust a single edge outward (positive) or inward (negative) by `delta_px`."""
+        current = self.margin_px
+        delta = float(delta_px)
+        updated = CropMarginOffsets(
+            top=current.top + (delta if edge == "top" else 0.0),
+            right=current.right + (delta if edge == "right" else 0.0),
+            bottom=current.bottom + (delta if edge == "bottom" else 0.0),
+            left=current.left + (delta if edge == "left" else 0.0),
+            unit="px",
+        )
+        return replace(self, margin_px=updated)
+
+    def with_corner_drag(
+        self,
+        corner_index: int,
+        new_x: float,
+        new_y: float,
+        *,
+        dpi: float | None = None,
+        min_size_px: float = 12.0,
+    ) -> RotatedCropBox:
+        """Resize the rotated crop box by dragging corner `corner_index` (0=TL..3=BL).
+
+        Keeps the opposite corner fixed in image coordinates and bakes any existing
+        margin offsets into the updated base rectangle geometry.
+        """
+        if corner_index not in (0, 1, 2, 3):
+            raise ValueError(f"corner_index must be 0..3, got {corner_index}")
+
+        pts = self.corners(dpi=dpi)
+        anchor = pts[(corner_index + 2) % 4]
+        anchor_x = float(anchor[0])
+        anchor_y = float(anchor[1])
+
+        eff_angle = self.effective_angle_deg
+        rad = math.radians(eff_angle)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        vx = float(new_x) - anchor_x
+        vy = float(new_y) - anchor_y
+        # Project image-space displacement into the box's rotated local frame.
+        local_u = vx * cos_a + vy * sin_a
+        local_v = -vx * sin_a + vy * cos_a
+
+        signs = ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0))
+        sign_u, sign_v = signs[corner_index]
+
+        new_w = max(float(min_size_px), local_u * sign_u)
+        new_h = max(float(min_size_px), local_v * sign_v)
+
+        half_u = 0.5 * sign_u * new_w
+        half_v = 0.5 * sign_v * new_h
+        new_cx = anchor_x + half_u * cos_a - half_v * sin_a
+        new_cy = anchor_y + half_u * sin_a + half_v * cos_a
+
+        return replace(
+            self,
+            center_x=float(new_cx),
+            center_y=float(new_cy),
+            width=float(new_w),
+            height=float(new_h),
+            margin_mm=CropMarginOffsets(unit="mm"),
+            margin_px=CropMarginOffsets(unit="px"),
+        )
+
+    def with_manual_angle_offset(self, delta_deg: float) -> RotatedCropBox:
+        """Set manual fine-angle offset in degrees (added to `angle_deg`)."""
+        return replace(self, manual_angle_offset_deg=float(delta_deg))
+
+    def with_auto_rotation(self, rotation_cw_deg: int) -> RotatedCropBox:
+        """Record the automatically detected 90°-step CW rotation."""
+        return replace(self, auto_rotation_cw_deg=normalize_rotation_cw(rotation_cw_deg))
+
+    def with_manual_rotation(self, rotation_cw_deg: int | None) -> RotatedCropBox:
+        """Set or clear (`None`) the manual 90°-step CW rotation override."""
+        if rotation_cw_deg is None:
+            return replace(self, manual_rotation_cw_deg=None)
+        return replace(self, manual_rotation_cw_deg=normalize_rotation_cw(rotation_cw_deg))
+
+    def rotate_manual_step(self, delta_cw_deg: int) -> RotatedCropBox:
+        """Incrementally rotate the effective 90°-step orientation (e.g. +90 or -90)."""
+        next_deg = normalize_rotation_cw(self.effective_rotation_cw_deg + int(delta_cw_deg))
+        return replace(self, manual_rotation_cw_deg=next_deg)
+
+    def to_normalized(
+        self,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+        source_dpi: float | None = None,
+    ) -> NormalizedCropBox:
+        """Convert this crop box into resolution-independent normalized coordinates."""
+        return NormalizedCropBox.from_crop_box(
+            self,
+            source_width=source_width,
+            source_height=source_height,
+            source_dpi=source_dpi,
+        )
+
+    def corners(self, dpi: float | None = None) -> np.ndarray:
+        """Return the 4 resolved corners as a `(4, 2)` float32 array in TL, TR, BR, BL order."""
+        cx, cy, w, h, angle = self.resolved_geometry(dpi=dpi)
+        half_w = w * 0.5
+        half_h = h * 0.5
+        rad = math.radians(angle)
         cos_a = math.cos(rad)
         sin_a = math.sin(rad)
 
@@ -145,21 +506,179 @@ class RotatedCropBox:
         )
         pts = [
             (
-                self.center_x + dx * cos_a - dy * sin_a,
-                self.center_y + dx * sin_a + dy * cos_a,
+                cx + dx * cos_a - dy * sin_a,
+                cy + dx * sin_a + dy * cos_a,
             )
             for dx, dy in local
         ]
         return np.array(pts, dtype=np.float32)
 
-    def bounding_rect(self) -> tuple[float, float, float, float]:
-        """Return axis-aligned bounding box `(x, y, w, h)` in image coordinates."""
-        pts = self.corners()
+    def bounding_rect(self, dpi: float | None = None) -> tuple[float, float, float, float]:
+        """Return resolved axis-aligned bounding box `(x, y, w, h)` in image coordinates."""
+        pts = self.corners(dpi=dpi)
         min_x = float(np.min(pts[:, 0]))
         min_y = float(np.min(pts[:, 1]))
         max_x = float(np.max(pts[:, 0]))
         max_y = float(np.max(pts[:, 1]))
         return min_x, min_y, max_x - min_x, max_y - min_y
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedCropBox:
+    """Resolution-independent crop box representation for preview-to-main-scan mapping.
+
+    Geometry is normalized by source image dimensions (`[0.0, 1.0]` range), physical
+    margin offsets are preserved in millimeters, pixel margin offsets are preserved as
+    normalized fractions of source width/height, and both fine-angle tweaks and 90°-step
+    rotation settings carry over unchanged.
+    """
+
+    center_x_norm: float
+    center_y_norm: float
+    width_norm: float
+    height_norm: float
+    angle_deg: float
+    confidence: float = 1.0
+    index: int = 0
+    margin_mm: CropMarginOffsets = field(default_factory=lambda: CropMarginOffsets(unit="mm"))
+    margin_top_norm: float = 0.0
+    margin_right_norm: float = 0.0
+    margin_bottom_norm: float = 0.0
+    margin_left_norm: float = 0.0
+    manual_angle_offset_deg: float = 0.0
+    auto_rotation_cw_deg: RotationDeg = 0
+    manual_rotation_cw_deg: RotationDeg | None = None
+
+    @classmethod
+    def from_crop_box(
+        cls,
+        box: RotatedCropBox,
+        *,
+        source_width: int | None = None,
+        source_height: int | None = None,
+        source_dpi: float | None = None,
+    ) -> NormalizedCropBox:
+        src_w = box.source_width if source_width is None else int(source_width)
+        src_h = box.source_height if source_height is None else int(source_height)
+        if src_w <= 0 or src_h <= 0:
+            raise ValueError(
+                f"Valid positive source dimensions are required, got ({src_w}, {src_h})"
+            )
+
+        # Preserve physical mm margins directly; express pixel margins as fractions of
+        # source dimensions so they scale accurately even if DPI metadata is omitted.
+        mm_margins = box.margin_mm
+        px_margins = box.margin_px
+        eff_dpi = box.source_dpi if source_dpi is None else float(source_dpi)
+        if px_margins.unit == "mm":
+            px_margins = (
+                px_margins.to_pixels(eff_dpi)
+                if eff_dpi > 0.0
+                else CropMarginOffsets(unit="px")
+            )
+
+        return cls(
+            center_x_norm=box.center_x / float(src_w),
+            center_y_norm=box.center_y / float(src_h),
+            width_norm=box.width / float(src_w),
+            height_norm=box.height / float(src_h),
+            angle_deg=box.angle_deg,
+            confidence=box.confidence,
+            index=box.index,
+            margin_mm=mm_margins,
+            margin_top_norm=px_margins.top / float(src_h),
+            margin_right_norm=px_margins.right / float(src_w),
+            margin_bottom_norm=px_margins.bottom / float(src_h),
+            margin_left_norm=px_margins.left / float(src_w),
+            manual_angle_offset_deg=box.manual_angle_offset_deg,
+            auto_rotation_cw_deg=box.auto_rotation_cw_deg,
+            manual_rotation_cw_deg=box.manual_rotation_cw_deg,
+        )
+
+    def to_crop_box(
+        self,
+        target_width: int,
+        target_height: int,
+        *,
+        target_dpi: float = 0.0,
+    ) -> RotatedCropBox:
+        """Project this normalized crop box onto a target scan image resolution."""
+        if target_width <= 0 or target_height <= 0:
+            raise ValueError(
+                f"Target dimensions must be positive, got ({target_width}, {target_height})"
+            )
+
+        tw = float(target_width)
+        th = float(target_height)
+        scaled_px_margins = CropMarginOffsets(
+            top=self.margin_top_norm * th,
+            right=self.margin_right_norm * tw,
+            bottom=self.margin_bottom_norm * th,
+            left=self.margin_left_norm * tw,
+            unit="px",
+        )
+        return RotatedCropBox(
+            center_x=self.center_x_norm * tw,
+            center_y=self.center_y_norm * th,
+            width=self.width_norm * tw,
+            height=self.height_norm * th,
+            angle_deg=self.angle_deg,
+            confidence=self.confidence,
+            index=self.index,
+            source_width=int(target_width),
+            source_height=int(target_height),
+            margin_mm=self.margin_mm,
+            margin_px=scaled_px_margins,
+            manual_angle_offset_deg=self.manual_angle_offset_deg,
+            auto_rotation_cw_deg=self.auto_rotation_cw_deg,
+            manual_rotation_cw_deg=self.manual_rotation_cw_deg,
+            source_dpi=float(target_dpi),
+        )
+
+
+def scale_crop_box(
+    box: RotatedCropBox,
+    *,
+    target_width: int,
+    target_height: int,
+    target_dpi: float = 0.0,
+    source_width: int | None = None,
+    source_height: int | None = None,
+) -> RotatedCropBox:
+    """Scale a preview-space `RotatedCropBox` to high-resolution main-scan pixel coordinates."""
+    normalized = NormalizedCropBox.from_crop_box(
+        box,
+        source_width=source_width,
+        source_height=source_height,
+    )
+    return normalized.to_crop_box(
+        target_width=target_width,
+        target_height=target_height,
+        target_dpi=target_dpi,
+    )
+
+
+def scale_crop_boxes(
+    boxes: Sequence[RotatedCropBox],
+    *,
+    target_width: int,
+    target_height: int,
+    target_dpi: float = 0.0,
+    source_width: int | None = None,
+    source_height: int | None = None,
+) -> list[RotatedCropBox]:
+    """Scale a sequence of `RotatedCropBox` instances to target scan resolution."""
+    return [
+        scale_crop_box(
+            box,
+            target_width=target_width,
+            target_height=target_height,
+            target_dpi=target_dpi,
+            source_width=source_width,
+            source_height=source_height,
+        )
+        for box in boxes
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,11 +730,17 @@ class MultiDocumentDetector:
     def __init__(self, config: DetectionConfig | None = None) -> None:
         self.config = config or DetectionConfig()
 
-    def detect(self, image: np.ndarray | bytes) -> list[RotatedCropBox]:
+    def detect(
+        self,
+        image: np.ndarray | bytes,
+        *,
+        dpi: float = 0.0,
+    ) -> list[RotatedCropBox]:
         """Detect rotated document bounding boxes in `image`.
 
         Args:
             image: OpenCV BGR/Gray ndarray or raw encoded image bytes.
+            dpi: Optional source scan DPI stored on each returned `RotatedCropBox`.
 
         Returns:
             List of `RotatedCropBox` sorted in reading order (top-to-bottom, left-to-right),
@@ -279,6 +804,7 @@ class MultiDocumentDetector:
                     index=0,
                     source_width=orig_w,
                     source_height=orig_h,
+                    source_dpi=float(dpi),
                 )
             )
 
@@ -508,11 +1034,13 @@ class DeskewCropProcessor:
         image: np.ndarray | bytes,
         *,
         boxes: list[RotatedCropBox] | None = None,
+        dpi: float | None = None,
     ) -> list[CroppedDocument]:
         """Detect (if `boxes` is omitted), refine skew, and crop all documents."""
         bgr = _ensure_bgr(decode_image_bytes(image) if isinstance(image, bytes) else image)
-        target_boxes = boxes if boxes is not None else self.detector.detect(bgr)
-        return [self.crop_box(bgr, box) for box in target_boxes]
+        detect_dpi = float(dpi) if dpi is not None else 0.0
+        target_boxes = boxes if boxes is not None else self.detector.detect(bgr, dpi=detect_dpi)
+        return [self.crop_box(bgr, box, dpi=dpi) for box in target_boxes]
 
     def crop_box(
         self,
@@ -520,21 +1048,27 @@ class DeskewCropProcessor:
         box: RotatedCropBox,
         *,
         refine_angle: bool | None = None,
+        dpi: float | None = None,
     ) -> CroppedDocument:
         """Refine a single box's tilt angle (optional) and extract the straightened crop."""
         bgr = _ensure_bgr(decode_image_bytes(image) if isinstance(image, bytes) else image)
-        do_refine = self.config.refine_angle if refine_angle is None else refine_angle
+        has_manual_angle = abs(box.manual_angle_offset_deg) > 1e-6
+        if refine_angle is None:
+            do_refine = self.config.refine_angle and not has_manual_angle
+        else:
+            do_refine = refine_angle
 
-        raw_angle = float(box.angle_deg)
+        eff_cx, eff_cy, eff_w, eff_h, eff_angle = box.resolved_geometry(dpi=dpi)
+        raw_angle = eff_angle
         residual = 0.0
-        method = "coarse"
+        method = "manual" if has_manual_angle and not do_refine else "coarse"
 
         if do_refine:
-            padded_w = max(16.0, box.width * (1.0 + 2.0 * self.config.padding_ratio))
-            padded_h = max(16.0, box.height * (1.0 + 2.0 * self.config.padding_ratio))
+            padded_w = max(16.0, eff_w * (1.0 + 2.0 * self.config.padding_ratio))
+            padded_h = max(16.0, eff_h * (1.0 + 2.0 * self.config.padding_ratio))
             coarse_patch = self._warp_crop(
                 bgr,
-                center=(box.center_x, box.center_y),
+                center=(eff_cx, eff_cy),
                 width=padded_w,
                 height=padded_h,
                 angle_deg=raw_angle,
@@ -542,21 +1076,22 @@ class DeskewCropProcessor:
             )
             residual, method = self.estimate_residual_angle(
                 coarse_patch,
-                inner_width=box.width,
-                inner_height=box.height,
+                inner_width=eff_w,
+                inner_height=eff_h,
             )
 
         refined_angle = raw_angle + residual
         cropped = self._warp_crop(
             bgr,
-            center=(box.center_x, box.center_y),
-            width=box.width,
-            height=box.height,
+            center=(eff_cx, eff_cy),
+            width=eff_w,
+            height=eff_h,
             angle_deg=refined_angle,
             interpolation=self.config.interpolation,
         )
 
-        refined_box = replace(box, angle_deg=refined_angle)
+        # Keep manual_angle_offset_deg intact while folding auto-estimated residual into angle_deg.
+        refined_box = replace(box, angle_deg=box.angle_deg + residual)
         return CroppedDocument(
             box=refined_box,
             image=cropped,
