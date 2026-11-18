@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 import threading
 from urllib.parse import urlparse
 
+import cv2
+import numpy as np
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 
 from open_escl_client.config.user_config import (
@@ -35,6 +38,19 @@ from open_escl_client.escl.capabilities import (
 )
 from open_escl_client.escl.discovery import DiscoveredScanner, EsclScannerDiscovery
 from open_escl_client.escl.scan_client import EsclScanClient
+from open_escl_client.imaging.multi_crop import (
+    CropMarginOffsets,
+    DeskewCropProcessor,
+    DetectionConfig,
+    MultiDocumentDetector,
+    RotatedCropBox,
+    decode_image_bytes,
+    encode_image_bytes,
+)
+from open_escl_client.imaging.orientation import (
+    AutoOrientationCorrector,
+    rotate_image_cw,
+)
 from open_escl_client.ui.image_provider import PreviewImageProvider
 
 INPUT_SOURCE_LABELS: dict[InputSourceKind, str] = {
@@ -100,6 +116,8 @@ class AppViewModel(QObject):
     isBusyChanged = Signal()
     previewChanged = Signal()
     previewZoomChanged = Signal()
+    cropSettingsChanged = Signal()
+    cropBoxesChanged = Signal()
 
     # Internal thread-safe completion signals for background scan tasks
     _previewFinishedInternal = Signal(object)
@@ -119,6 +137,8 @@ class AppViewModel(QObject):
         naming_engine: FileNamingEngine | None = None,
         exporter: ImageExporter | None = None,
         config_store: UserConfigStore | None = None,
+        deskew_processor: DeskewCropProcessor | None = None,
+        orientation_corrector: AutoOrientationCorrector | None = None,
         run_preview_async: bool = False,
     ) -> None:
         super().__init__(parent)
@@ -132,6 +152,8 @@ class AppViewModel(QObject):
         self._naming_engine = naming_engine or FileNamingEngine()
         self._exporter = exporter or ImageExporter()
         self._config_store = config_store
+        self._deskew_processor = deskew_processor or DeskewCropProcessor()
+        self._orientation_corrector = orientation_corrector or AutoOrientationCorrector()
         self._run_preview_async = run_preview_async
         self._image_provider = PreviewImageProvider()
 
@@ -184,8 +206,17 @@ class AppViewModel(QObject):
         self._cancel_requested: bool = False
 
         self._preview_session: PreviewSession | None = None
+        self._preview_bgr: np.ndarray | None = None
         self._preview_image_url: str = ""
         self._preview_zoom: float = 1.0
+
+        self._auto_crop_enabled: bool = True
+        self._multi_document_enabled: bool = True
+        self._auto_orientation_enabled: bool = True
+        self._crop_margin_mm: float = 0.0
+        self._crop_boxes: list[RotatedCropBox] = []
+        self._crop_thumbnail_urls: dict[int, str] = {}
+        self._selected_crop_index: int = -1
 
         self._continuous_session: ContinuousScanSession | None = None
         self._saved_file_count: int = 0
@@ -444,6 +475,345 @@ class AppViewModel(QObject):
     def previewZoom(self) -> float:
         return self._preview_zoom
 
+    @Property(int, notify=previewChanged)
+    def previewImageWidth(self) -> int:
+        if self._preview_session is not None:
+            return int(self._preview_session.image_width_px)
+        return 0
+
+    @Property(int, notify=previewChanged)
+    def previewImageHeight(self) -> int:
+        if self._preview_session is not None:
+            return int(self._preview_session.image_height_px)
+        return 0
+
+    @Property(bool, notify=cropSettingsChanged)
+    def autoCropEnabled(self) -> bool:
+        return self._auto_crop_enabled
+
+    @autoCropEnabled.setter
+    def autoCropEnabled(self, value: bool) -> None:
+        flag = bool(value)
+        if self._auto_crop_enabled != flag:
+            self._auto_crop_enabled = flag
+            self.cropSettingsChanged.emit()
+            if self._preview_bgr is not None:
+                self._analyze_preview_crops()
+
+    @Property(bool, notify=cropSettingsChanged)
+    def multiDocumentEnabled(self) -> bool:
+        return self._multi_document_enabled
+
+    @multiDocumentEnabled.setter
+    def multiDocumentEnabled(self, value: bool) -> None:
+        flag = bool(value)
+        if self._multi_document_enabled != flag:
+            self._multi_document_enabled = flag
+            self.cropSettingsChanged.emit()
+            if self._preview_bgr is not None and self._auto_crop_enabled:
+                self._analyze_preview_crops()
+
+    @Property(bool, notify=cropSettingsChanged)
+    def autoOrientationEnabled(self) -> bool:
+        return self._auto_orientation_enabled
+
+    @autoOrientationEnabled.setter
+    def autoOrientationEnabled(self, value: bool) -> None:
+        flag = bool(value)
+        if self._auto_orientation_enabled != flag:
+            self._auto_orientation_enabled = flag
+            self.cropSettingsChanged.emit()
+            if self._preview_bgr is not None and self._auto_crop_enabled:
+                self._analyze_preview_crops()
+
+    @Property(float, notify=cropSettingsChanged)
+    def cropMarginMm(self) -> float:
+        return self._crop_margin_mm
+
+    @cropMarginMm.setter
+    def cropMarginMm(self, value: float) -> None:
+        clamped = round(max(-10.0, min(10.0, float(value))), 2)
+        if abs(self._crop_margin_mm - clamped) > 1e-6:
+            self._crop_margin_mm = clamped
+            self.cropSettingsChanged.emit()
+            if self._crop_boxes:
+                self._crop_boxes = [
+                    box.with_uniform_margin(clamped, unit="mm") for box in self._crop_boxes
+                ]
+                self._rebuild_all_crop_thumbnails()
+                self.cropBoxesChanged.emit()
+
+    @Property(int, notify=cropBoxesChanged)
+    def cropCount(self) -> int:
+        return len(self._crop_boxes)
+
+    @Property(int, notify=cropBoxesChanged)
+    def selectedCropIndex(self) -> int:
+        return self._selected_crop_index
+
+    @Property(float, notify=cropBoxesChanged)
+    def selectedCropFineAngle(self) -> float:
+        if 0 <= self._selected_crop_index < len(self._crop_boxes):
+            return round(self._crop_boxes[self._selected_crop_index].manual_angle_offset_deg, 2)
+        return 0.0
+
+    @Property(int, notify=cropBoxesChanged)
+    def selectedCropRotationDeg(self) -> int:
+        if 0 <= self._selected_crop_index < len(self._crop_boxes):
+            return int(self._crop_boxes[self._selected_crop_index].effective_rotation_cw_deg)
+        return 0
+
+    @Property("QVariantList", notify=cropBoxesChanged)
+    def cropBoxes(self) -> list[dict[str, object]]:
+        """Serialize detected/adjusted crop boxes into normalized coordinates for QML."""
+        if not self._crop_boxes or self._preview_session is None:
+            return []
+        src_w = max(1, int(self._preview_session.image_width_px))
+        src_h = max(1, int(self._preview_session.image_height_px))
+        dpi = float(self._preview_session.preview_dpi)
+        result: list[dict[str, object]] = []
+
+        for list_idx, box in enumerate(self._crop_boxes):
+            eff_cx, eff_cy, eff_w, eff_h, eff_angle = box.resolved_geometry(dpi=dpi)
+            corners = box.corners(dpi=dpi)
+            corners_norm = [
+                [
+                    float(np.clip(pt[0] / float(src_w), 0.0, 1.0)),
+                    float(np.clip(pt[1] / float(src_h), 0.0, 1.0)),
+                ]
+                for pt in corners
+            ]
+            result.append(
+                {
+                    "listIndex": list_idx,
+                    "index": box.index,
+                    "selected": list_idx == self._selected_crop_index,
+                    "cornersNorm": corners_norm,
+                    "centerXNorm": float(eff_cx / float(src_w)),
+                    "centerYNorm": float(eff_cy / float(src_h)),
+                    "widthNorm": float(eff_w / float(src_w)),
+                    "heightNorm": float(eff_h / float(src_h)),
+                    "angleDeg": round(float(box.angle_deg), 2),
+                    "manualAngleOffsetDeg": round(float(box.manual_angle_offset_deg), 2),
+                    "effectiveAngleDeg": round(float(eff_angle), 2),
+                    "autoRotationDeg": int(box.auto_rotation_cw_deg),
+                    "manualRotationDeg": (
+                        int(box.manual_rotation_cw_deg)
+                        if box.manual_rotation_cw_deg is not None
+                        else -1
+                    ),
+                    "effectiveRotationDeg": int(box.effective_rotation_cw_deg),
+                    "marginMm": round(float(box.margin_mm.top), 2),
+                    "widthPx": int(round(eff_w)),
+                    "heightPx": int(round(eff_h)),
+                    "thumbnailUrl": self._crop_thumbnail_urls.get(box.index, ""),
+                }
+            )
+        return result
+
+    @property
+    def detected_crop_boxes(self) -> list[RotatedCropBox]:
+        """Return the current list of preview-space `RotatedCropBox` instances."""
+        return list(self._crop_boxes)
+
+    def _clear_crop_boxes(self) -> None:
+        self._crop_boxes = []
+        self._crop_thumbnail_urls = {}
+        self._selected_crop_index = -1
+        self._image_provider.clear_crop_thumbnails()
+        self.cropBoxesChanged.emit()
+
+    def _render_thumbnail_bytes(self, bgr: np.ndarray, max_side: int = 320) -> bytes:
+        h, w = bgr.shape[:2]
+        longest = max(h, w)
+        if longest > max_side and longest > 0:
+            scale = max_side / float(longest)
+            thumb = cv2.resize(
+                bgr,
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            thumb = bgr
+        return encode_image_bytes(thumb, fmt="JPEG", quality=85)
+
+    def _rebuild_crop_thumbnail(self, list_index: int) -> None:
+        if self._preview_bgr is None or self._preview_session is None:
+            return
+        if not (0 <= list_index < len(self._crop_boxes)):
+            return
+        box = self._crop_boxes[list_index]
+        dpi = float(self._preview_session.preview_dpi)
+        cropped = self._deskew_processor.crop_box(
+            self._preview_bgr,
+            box,
+            refine_angle=False,
+            dpi=dpi,
+        )
+        rotated = rotate_image_cw(cropped.image, box.effective_rotation_cw_deg)
+        thumb_bytes = self._render_thumbnail_bytes(rotated)
+        url = self._image_provider.set_crop_thumbnail(box.index, thumb_bytes)
+        self._crop_thumbnail_urls[box.index] = url
+
+    def _rebuild_all_crop_thumbnails(self) -> None:
+        self._image_provider.clear_crop_thumbnails()
+        self._crop_thumbnail_urls = {}
+        for idx in range(len(self._crop_boxes)):
+            self._rebuild_crop_thumbnail(idx)
+
+    def _analyze_preview_crops(self) -> None:
+        """Run multi-document detection, fine deskew, and optional 90/180/270 auto orientation."""
+        if not self._auto_crop_enabled or self._preview_bgr is None or self._preview_session is None:
+            self._clear_crop_boxes()
+            return
+
+        dpi = float(self._preview_session.preview_dpi)
+        detector = MultiDocumentDetector(
+            DetectionConfig(multi_document=self._multi_document_enabled)
+        )
+        detected = detector.detect(self._preview_bgr, dpi=dpi)
+        if not detected:
+            self._clear_crop_boxes()
+            return
+
+        analyzed: list[RotatedCropBox] = []
+        self._image_provider.clear_crop_thumbnails()
+        self._crop_thumbnail_urls = {}
+
+        for raw_box in detected:
+            box_with_margin = raw_box.with_uniform_margin(self._crop_margin_mm, unit="mm")
+            cropped = self._deskew_processor.crop_box(
+                self._preview_bgr,
+                box_with_margin,
+                refine_angle=True,
+                dpi=dpi,
+            )
+            refined_box = cropped.box
+            final_img = cropped.image
+
+            if self._auto_orientation_enabled:
+                estimate = self._orientation_corrector.detect_orientation(cropped.image)
+                auto_rot = estimate.rotation_cw_deg if estimate.applied else 0
+                refined_box = refined_box.with_auto_rotation(auto_rot)
+                final_img = rotate_image_cw(cropped.image, auto_rot)
+            else:
+                refined_box = refined_box.with_auto_rotation(0)
+
+            analyzed.append(refined_box)
+            thumb_bytes = self._render_thumbnail_bytes(final_img)
+            url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
+            self._crop_thumbnail_urls[refined_box.index] = url
+
+        self._crop_boxes = analyzed
+        self._selected_crop_index = 0 if analyzed else -1
+        self.cropBoxesChanged.emit()
+
+    @Slot(int)
+    def selectCropBox(self, list_index: int) -> None:
+        if 0 <= list_index < len(self._crop_boxes):
+            if self._selected_crop_index != list_index:
+                self._selected_crop_index = list_index
+                self.cropBoxesChanged.emit()
+
+    @Slot()
+    def redetectCropBoxes(self) -> None:
+        """Re-run automatic crop detection and orientation analysis on the current preview."""
+        if self._preview_bgr is None:
+            return
+        self._analyze_preview_crops()
+        if self._crop_boxes:
+            self.set_status_message(f"自動トリミング枠を {len(self._crop_boxes)} 件検出しました")
+        else:
+            self.set_status_message("自動トリミング枠は検出されませんでした")
+
+    @Slot(int, float, float)
+    def moveCropBoxByNorm(self, list_index: int, dx_norm: float, dy_norm: float) -> None:
+        """Translate crop box `list_index` by normalized delta `(dx_norm, dy_norm)`."""
+        if self._preview_session is None or not (0 <= list_index < len(self._crop_boxes)):
+            return
+        dx_px = float(dx_norm) * float(self._preview_session.image_width_px)
+        dy_px = float(dy_norm) * float(self._preview_session.image_height_px)
+        self._crop_boxes[list_index] = self._crop_boxes[list_index].with_position_offset(
+            dx_px, dy_px
+        )
+        self._selected_crop_index = list_index
+        self._rebuild_crop_thumbnail(list_index)
+        self.cropBoxesChanged.emit()
+
+    @Slot(int, int, float, float)
+    def dragCropCornerToNorm(
+        self,
+        list_index: int,
+        corner_index: int,
+        norm_x: float,
+        norm_y: float,
+    ) -> None:
+        """Resize crop box `list_index` by moving corner `corner_index` to normalized `(x, y)`."""
+        if self._preview_session is None or not (0 <= list_index < len(self._crop_boxes)):
+            return
+        px_x = float(np.clip(norm_x, 0.0, 1.0)) * float(self._preview_session.image_width_px)
+        px_y = float(np.clip(norm_y, 0.0, 1.0)) * float(self._preview_session.image_height_px)
+        dpi = float(self._preview_session.preview_dpi)
+        self._crop_boxes[list_index] = self._crop_boxes[list_index].with_corner_drag(
+            int(corner_index),
+            px_x,
+            px_y,
+            dpi=dpi,
+        )
+        self._selected_crop_index = list_index
+        self._rebuild_crop_thumbnail(list_index)
+        self.cropBoxesChanged.emit()
+
+    @Slot(int, int)
+    def rotateCropBox(self, list_index: int, delta_cw_deg: int) -> None:
+        """Manually rotate crop box `list_index` in 90-degree increments (e.g. +90 or -90)."""
+        if not (0 <= list_index < len(self._crop_boxes)):
+            return
+        self._crop_boxes[list_index] = self._crop_boxes[list_index].rotate_manual_step(
+            int(delta_cw_deg)
+        )
+        self._selected_crop_index = list_index
+        self._rebuild_crop_thumbnail(list_index)
+        self.cropBoxesChanged.emit()
+
+    @Slot()
+    def rotateSelectedCropLeft(self) -> None:
+        """Rotate the selected crop box 90° counter-clockwise."""
+        self.rotateCropBox(self._selected_crop_index, -90)
+
+    @Slot()
+    def rotateSelectedCropRight(self) -> None:
+        """Rotate the selected crop box 90° clockwise."""
+        self.rotateCropBox(self._selected_crop_index, 90)
+
+    @Slot(float)
+    def setSelectedCropFineAngle(self, delta_deg: float) -> None:
+        """Adjust manual fine tilt angle offset (in degrees) of the selected crop box."""
+        if not (0 <= self._selected_crop_index < len(self._crop_boxes)):
+            return
+        clamped = round(max(-15.0, min(15.0, float(delta_deg))), 1)
+        box = self._crop_boxes[self._selected_crop_index]
+        if abs(box.manual_angle_offset_deg - clamped) > 1e-6:
+            self._crop_boxes[self._selected_crop_index] = box.with_manual_angle_offset(clamped)
+            self._rebuild_crop_thumbnail(self._selected_crop_index)
+            self.cropBoxesChanged.emit()
+
+    @Slot()
+    def resetSelectedCropAdjustments(self) -> None:
+        """Reset manual fine angle, manual 90° override, and px edge tweaks on selected box."""
+        if not (0 <= self._selected_crop_index < len(self._crop_boxes)):
+            return
+        box = self._crop_boxes[self._selected_crop_index]
+        self._crop_boxes[self._selected_crop_index] = replace(
+            box,
+            margin_mm=CropMarginOffsets.uniform(self._crop_margin_mm, unit="mm"),
+            margin_px=CropMarginOffsets(unit="px"),
+            manual_angle_offset_deg=0.0,
+            manual_rotation_cw_deg=None,
+        )
+        self._rebuild_crop_thumbnail(self._selected_crop_index)
+        self.cropBoxesChanged.emit()
+
     @Slot()
     def zoomInPreview(self) -> None:
         self._preview_zoom = min(4.0, round(self._preview_zoom + 0.25, 2))
@@ -596,12 +966,20 @@ class AppViewModel(QObject):
         try:
             url = self._image_provider.update_image_bytes(session_obj.image_bytes)
             self._preview_session = session_obj
+            self._preview_bgr = decode_image_bytes(session_obj.image_bytes)
             self._preview_image_url = url
             self._preview_zoom = 1.0
             self.previewZoomChanged.emit()
             self.previewChanged.emit()
+            self._analyze_preview_crops()
+            crop_note = (
+                f" / 自動検出: {len(self._crop_boxes)}枚"
+                if self._auto_crop_enabled and self._crop_boxes
+                else ""
+            )
             self.set_status_message(
-                f"プレビュー完了 ({session_obj.preview_dpi} dpi / {session_obj.image_width_px}×{session_obj.image_height_px} px)"
+                f"プレビュー完了 ({session_obj.preview_dpi} dpi / "
+                f"{session_obj.image_width_px}×{session_obj.image_height_px} px{crop_note})"
             )
         except Exception as exc:
             self.set_status_message(f"プレビュー画像の読み込みに失敗しました: {exc}")

@@ -16,7 +16,7 @@ import QtQuick.Layouts
 GroupBox {
     id: savePanelRoot
     objectName: "saveSettingsPanel"
-    title: "3. 保存設定（フォルダ・命名規則・形式・圧縮率）"
+    title: "4. 保存設定（フォルダ・命名規則・形式・圧縮率）"
 
     FolderDialog {
         id: saveFolderDialog

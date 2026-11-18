@@ -112,13 +112,14 @@ Rectangle {
                 }
             }
 
-            // プレビュー画像表示領域（ズーム・スクロール対応）
+            // プレビュー画像表示領域（ズーム・スクロール・トリミング枠オーバーレイ対応）
             Flickable {
                 id: previewFlickable
                 objectName: "previewFlickable"
                 anchors.fill: parent
                 anchors.margins: 12
                 clip: true
+                interactive: !cropOverlay.dragging
                 visible: viewModel ? viewModel.hasPreview : false
                 contentWidth: Math.max(width, previewCanvasImage.width)
                 contentHeight: Math.max(height, previewCanvasImage.height)
@@ -133,6 +134,15 @@ Rectangle {
                     cache: false
                     asynchronous: false
                     source: viewModel ? viewModel.previewImageUrl : ""
+
+                    // 実際の画像描画領域 (paintedWidth × paintedHeight) にぴったり重ねるオーバーレイ
+                    CropOverlay {
+                        id: cropOverlay
+                        x: (previewCanvasImage.width - previewCanvasImage.paintedWidth) * 0.5
+                        y: (previewCanvasImage.height - previewCanvasImage.paintedHeight) * 0.5
+                        width: previewCanvasImage.paintedWidth
+                        height: previewCanvasImage.paintedHeight
+                    }
                 }
             }
 
@@ -159,6 +169,150 @@ Rectangle {
                         font.pixelSize: 14
                         font.bold: true
                         color: "#1F2937"
+                    }
+                }
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // 3. 切り出し・角度補正・自動回転結果のサムネイル確認ストリップ
+        // --------------------------------------------------------------------
+        Rectangle {
+            id: cropThumbnailsStrip
+            objectName: "cropThumbnailsStrip"
+            Layout.fillWidth: true
+            Layout.preferredHeight: 158
+            color: "#F9FAFB"
+            border.color: "#D1D5DB"
+            border.width: 1
+            radius: 6
+            visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled && viewModel.cropCount > 0) : false
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 6
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Label {
+                        text: "切り出し・角度補正・自動回転プレビュー (" + (viewModel ? viewModel.cropCount : 0) + "件)"
+                        font.pixelSize: 12
+                        font.bold: true
+                        color: "#374151"
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Label {
+                        text: "各カードをクリックして選択・90°回転や余白を微調整できます"
+                        font.pixelSize: 11
+                        color: "#6B7280"
+                    }
+                }
+
+                ListView {
+                    id: cropThumbnailList
+                    objectName: "cropThumbnailList"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    orientation: ListView.Horizontal
+                    spacing: 10
+                    clip: true
+                    model: viewModel ? viewModel.cropBoxes : []
+
+                    delegate: Rectangle {
+                        id: thumbCard
+                        width: 128
+                        height: cropThumbnailList.height
+                        radius: 5
+                        color: modelData.selected ? "#EFF6FF" : "#FFFFFF"
+                        border.color: modelData.selected ? "#2563EB" : "#D1D5DB"
+                        border.width: modelData.selected ? 2 : 1
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (viewModel) {
+                                    viewModel.selectCropBox(modelData.listIndex)
+                                }
+                            }
+                        }
+
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: 5
+                            spacing: 3
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+
+                                Label {
+                                    text: "#" + modelData.index
+                                    font.pixelSize: 11
+                                    font.bold: true
+                                    color: modelData.selected ? "#1D4ED8" : "#059669"
+                                }
+
+                                Item { Layout.fillWidth: true }
+
+                                Label {
+                                    text: modelData.effectiveRotationDeg + "°"
+                                    font.pixelSize: 10
+                                    font.bold: true
+                                    color: "#4B5563"
+                                }
+                            }
+
+                            Image {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                fillMode: Image.PreserveAspectFit
+                                cache: false
+                                asynchronous: false
+                                source: modelData.thumbnailUrl || ""
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+
+                                Button {
+                                    text: "↺"
+                                    implicitWidth: 26
+                                    implicitHeight: 20
+                                    padding: 0
+                                    onClicked: {
+                                        if (viewModel) {
+                                            viewModel.rotateCropBox(modelData.listIndex, -90)
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                    text: (modelData.effectiveAngleDeg >= 0 ? "+" : "") + modelData.effectiveAngleDeg.toFixed(1) + "°"
+                                    font.pixelSize: 10
+                                    color: "#6B7280"
+                                }
+
+                                Button {
+                                    text: "↻"
+                                    implicitWidth: 26
+                                    implicitHeight: 20
+                                    padding: 0
+                                    onClicked: {
+                                        if (viewModel) {
+                                            viewModel.rotateCropBox(modelData.listIndex, 90)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
