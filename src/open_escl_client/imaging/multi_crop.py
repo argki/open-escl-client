@@ -699,6 +699,7 @@ class DetectionConfig:
     full_page_paper_fallback: bool = True
     paper_color_match_max_delta_e: float = 9.0
     printed_border_ink_drop_l: float = 40.0
+    merge_same_sheet_fragments: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -771,7 +772,15 @@ class MultiDocumentDetector:
 
         inv_scale = 1.0 / scale
         min_side_work = max(8.0, self.config.min_side_px * scale)
-        candidates: list[RotatedCropBox] = []
+        work_lab = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2LAB)
+        bg_lab, _ = self._estimate_background_stats(work_lab)
+        bg_l = float(bg_lab[0])
+        bg_chroma = math.hypot(float(bg_lab[1]) - 128.0, float(bg_lab[2]) - 128.0)
+        is_light_platen = bg_l >= 185.0 and bg_chroma <= 24.0
+
+        solid_candidates: list[RotatedCropBox] = []
+        printed_fragments: list[tuple[RotatedCropBox, np.ndarray]] = []
+        frag_min_area_ratio = min(self.config.min_area_ratio, 0.0004)
 
         for contour in contours:
             contour_area = float(cv2.contourArea(contour))
@@ -785,32 +794,137 @@ class MultiDocumentDetector:
                 continue
 
             area_ratio = rect_area / work_area
-            if area_ratio < self.config.min_area_ratio:
-                continue
             if area_ratio > self.config.max_area_ratio:
-                continue
-            if min(rw, rh) < min_side_work:
                 continue
 
             rectangularity = min(1.0, contour_area / rect_area)
-            if rectangularity < self.config.min_rectangularity:
+            is_regular = (
+                area_ratio >= self.config.min_area_ratio
+                and min(rw, rh) >= min_side_work
+                and rectangularity >= self.config.min_rectangularity
+            )
+            is_small_fragment = (
+                is_light_platen
+                and self.config.merge_same_sheet_fragments
+                and area_ratio >= frag_min_area_ratio
+                and min(rw, rh) >= 7.0
+                and max(rw, rh) >= 16.0
+                and rectangularity >= 0.25
+            )
+            if not is_regular and not is_small_fragment:
                 continue
 
-            candidates.append(
+            work_box = RotatedCropBox(
+                center_x=cx,
+                center_y=cy,
+                width=rw,
+                height=rh,
+                angle_deg=angle_deg,
+                confidence=round(float(rectangularity), 4),
+                index=0,
+                source_width=work_w,
+                source_height=work_h,
+                source_dpi=float(dpi),
+            )
+
+            if (
+                is_light_platen
+                and self.config.merge_same_sheet_fragments
+                and self._is_white_sheet_printed_fragment(work_lab, bg_lab, work_box)
+            ):
+                printed_fragments.append((work_box, contour))
+            elif is_regular:
+                solid_candidates.append(
+                    RotatedCropBox(
+                        center_x=cx * inv_scale,
+                        center_y=cy * inv_scale,
+                        width=rw * inv_scale,
+                        height=rh * inv_scale,
+                        angle_deg=angle_deg,
+                        confidence=round(float(rectangularity), 4),
+                        index=0,
+                        source_width=orig_w,
+                        source_height=orig_h,
+                        source_dpi=float(dpi),
+                    )
+                )
+
+        merged_printed: list[RotatedCropBox] = []
+        merged_printed_raw: list[RotatedCropBox] = []
+        if printed_fragments:
+            solid_work_boxes = [
                 RotatedCropBox(
-                    center_x=cx * inv_scale,
-                    center_y=cy * inv_scale,
-                    width=rw * inv_scale,
-                    height=rh * inv_scale,
-                    angle_deg=angle_deg,
-                    confidence=round(float(rectangularity), 4),
-                    index=0,
+                    center_x=b.center_x * scale,
+                    center_y=b.center_y * scale,
+                    width=b.width * scale,
+                    height=b.height * scale,
+                    angle_deg=b.angle_deg,
+                    confidence=b.confidence,
+                    source_width=work_w,
+                    source_height=work_h,
+                )
+                for b in solid_candidates
+            ]
+            merged_pairs = self._merge_same_sheet_printed_fragments(
+                work_bgr,
+                printed_fragments,
+                solid_work_boxes,
+                min_side_work=min_side_work,
+            )
+            for raw_wb, exp_wb in merged_pairs:
+                merged_printed_raw.append(
+                    RotatedCropBox(
+                        center_x=raw_wb.center_x * inv_scale,
+                        center_y=raw_wb.center_y * inv_scale,
+                        width=raw_wb.width * inv_scale,
+                        height=raw_wb.height * inv_scale,
+                        angle_deg=raw_wb.angle_deg,
+                        confidence=raw_wb.confidence,
+                        index=0,
+                        source_width=orig_w,
+                        source_height=orig_h,
+                        source_dpi=float(dpi),
+                    )
+                )
+                merged_printed.append(
+                    RotatedCropBox(
+                        center_x=exp_wb.center_x * inv_scale,
+                        center_y=exp_wb.center_y * inv_scale,
+                        width=exp_wb.width * inv_scale,
+                        height=exp_wb.height * inv_scale,
+                        angle_deg=exp_wb.angle_deg,
+                        confidence=exp_wb.confidence,
+                        index=0,
+                        source_width=orig_w,
+                        source_height=orig_h,
+                        source_dpi=float(dpi),
+                    )
+                )
+
+        # Evaluate full-page paper fallback using unpadded boxes so inner printed boundaries
+        # (table borders / text edges) are inspected directly before outer margin padding.
+        raw_filtered = self._suppress_contained_boxes(solid_candidates + merged_printed_raw)
+        if (
+            raw_filtered
+            and self.config.full_page_paper_fallback
+            and self._is_printed_content_on_full_page(work_bgr, raw_filtered, scale)
+        ):
+            return [
+                RotatedCropBox(
+                    center_x=orig_w * 0.5,
+                    center_y=orig_h * 0.5,
+                    width=float(orig_w),
+                    height=float(orig_h),
+                    angle_deg=0.0,
+                    confidence=1.0,
+                    index=1,
                     source_width=orig_w,
                     source_height=orig_h,
                     source_dpi=float(dpi),
                 )
-            )
+            ]
 
+        candidates = solid_candidates + merged_printed
         filtered = self._suppress_contained_boxes(candidates)
         if not filtered:
             if self.config.full_page_paper_fallback and self._has_full_page_printed_ink(work_bgr):
@@ -829,24 +943,6 @@ class MultiDocumentDetector:
                     )
                 ]
             return []
-
-        if self.config.full_page_paper_fallback and self._is_printed_content_on_full_page(
-            work_bgr, filtered, scale
-        ):
-            return [
-                RotatedCropBox(
-                    center_x=orig_w * 0.5,
-                    center_y=orig_h * 0.5,
-                    width=float(orig_w),
-                    height=float(orig_h),
-                    angle_deg=0.0,
-                    confidence=1.0,
-                    index=1,
-                    source_width=orig_w,
-                    source_height=orig_h,
-                    source_dpi=float(dpi),
-                )
-            ]
 
         if not self.config.multi_document:
             largest = max(filtered, key=lambda b: b.area)
@@ -928,6 +1024,37 @@ class MultiDocumentDetector:
         color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, open_kernel)
         color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, close_kernel)
 
+        # On a uniform bright white platen (typical flatbed cover), thin printed text on white
+        # thermal receipts can be eroded away by `open_kernel` above. Preserve genuine dark ink
+        # clusters with a dedicated text-grouping mask (ignoring outer scanner frame artifacts).
+        bg_l = float(bg_lab[0])
+        bg_chroma = math.hypot(float(bg_lab[1]) - 128.0, float(bg_lab[2]) - 128.0)
+        if bg_l >= 210.0 and bg_chroma <= 22.0 and bg_sigma <= 3.0:
+            raw_lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+            ink_drop = max(28.0, bg_sigma * 6.0 + 20.0)
+            text_mask = ((bg_l - raw_lab[:, :, 0].astype(np.float32)) >= ink_drop).astype(
+                np.uint8
+            ) * 255
+            border_trim = max(4, min(10, int(round(min_dim * 0.006))))
+            text_mask[:border_trim, :] = 0
+            text_mask[-border_trim:, :] = 0
+            text_mask[:, :border_trim] = 0
+            text_mask[:, -border_trim:] = 0
+
+            # Remove 1-pixel dust specks, then close intra-word and intra-line gaps.
+            text_mask = cv2.morphologyEx(
+                text_mask,
+                cv2.MORPH_OPEN,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)),
+            )
+            text_close_k = max(7, min(15, int(round(min_dim * 0.014)) | 1))
+            text_mask = cv2.morphologyEx(
+                text_mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (text_close_k, text_close_k)),
+            )
+            color_mask = cv2.bitwise_or(color_mask, text_mask)
+
         if not self.config.use_edge_assist:
             return self._fill_external_contours(color_mask)
 
@@ -959,11 +1086,12 @@ class MultiDocumentDetector:
             apertureSize=3,
         )
 
-        # Suppress 2px outer frame border artifacts.
-        edge_mask[:2, :] = 0
-        edge_mask[-2:, :] = 0
-        edge_mask[:, :2] = 0
-        edge_mask[:, -2:] = 0
+        # Suppress outer scanner frame border artifacts.
+        edge_trim = max(4, min(10, int(round(min_dim * 0.006))))
+        edge_mask[:edge_trim, :] = 0
+        edge_mask[-edge_trim:, :] = 0
+        edge_mask[:, :edge_trim] = 0
+        edge_mask[:, -edge_trim:] = 0
 
         edge_close_k = max(5, int(round(min_dim * 0.01)) | 1)
         edge_close_k = min(edge_close_k, 13)
@@ -1004,6 +1132,267 @@ class MultiDocumentDetector:
         combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, open_kernel)
         return self._fill_external_contours(combined)
 
+    def _is_white_sheet_printed_fragment(
+        self,
+        work_lab: np.ndarray,
+        bg_lab: np.ndarray,
+        box: RotatedCropBox,
+    ) -> bool:
+        """Return True if `box` is a printed block on white paper rather than a solid sheet."""
+        h, w = work_lab.shape[:2]
+        bg_l = float(bg_lab[0])
+        pts = box.corners()
+        poly = np.round(pts).astype(np.int32)
+        box_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillConvexPoly(box_mask, poly, 255)
+        inside_pixels = work_lab[box_mask > 0].astype(np.float32)
+        if len(inside_pixels) < 30:
+            return False
+
+        # Check for dark printed ink sitting right on the box boundary (text/logo/barcode/rule)
+        # as opposed to a faint physical paper-edge shadow around blank white margins.
+        rim_px = max(3, min(10, int(round(min(box.width, box.height) * 0.14))))
+        rim_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (rim_px * 2 + 1, rim_px * 2 + 1))
+        eroded = cv2.erode(box_mask, rim_kernel)
+        inner_rim = cv2.subtract(box_mask, eroded)
+        rim_l = work_lab[:, :, 0][inner_rim > 0].astype(np.float32)
+        if rim_l.size == 0:
+            return False
+
+        # Require genuine dark printed ink (text/logo/barcode/rule, L drop >= 48) sitting right
+        # on the box boundary so faint physical paper-edge shadows (~20-38 drop) stay solid sheets.
+        ink_drop = max(48.0, self.config.printed_border_ink_drop_l + 8.0)
+        ink_ratio = float(np.count_nonzero((bg_l - rim_l) >= ink_drop)) / float(rim_l.size)
+        if ink_ratio < 0.03:
+            return False
+
+        # Verify interior paper ground color matches the bright platen (white/thermal paper).
+        l_cutoff = float(np.percentile(inside_pixels[:, 0], 88))
+        bright_inside = inside_pixels[inside_pixels[:, 0] >= l_cutoff]
+        if len(bright_inside) == 0:
+            return False
+        paper_lab = np.median(bright_inside, axis=0)
+        paper_l = float(paper_lab[0])
+        paper_chroma = math.hypot(float(paper_lab[1]) - 128.0, float(paper_lab[2]) - 128.0)
+        delta_e_paper = float(
+            math.sqrt(
+                ((paper_l - bg_l) * 1.15) ** 2
+                + (float(paper_lab[1]) - float(bg_lab[1])) ** 2
+                + (float(paper_lab[2]) - float(bg_lab[2])) ** 2
+            )
+        )
+        if delta_e_paper <= self.config.paper_color_match_max_delta_e:
+            return True
+
+        # Also treat compact neutral dark-ink elements (inverted promo banners, solid logos,
+        # QR blocks) as printed fragments so they merge back into their surrounding white receipt.
+        box_area_ratio = box.area / float(h * w)
+        return paper_l < 140.0 and paper_chroma <= 18.0 and box_area_ratio < 0.04
+
+    def _merge_same_sheet_printed_fragments(
+        self,
+        work_bgr: np.ndarray,
+        fragments: list[tuple[RotatedCropBox, np.ndarray]],
+        solid_boxes: list[RotatedCropBox],
+        *,
+        min_side_work: float,
+    ) -> list[tuple[RotatedCropBox, RotatedCropBox]]:
+        """Cluster nearby aligned printed blocks on white sheets into `(raw, expanded)` boxes."""
+        n = len(fragments)
+        if n == 0:
+            return []
+
+        h, w = work_bgr.shape[:2]
+        work_area = float(h * w)
+        max_dim = float(max(h, w))
+
+        rects = [box.bounding_rect() for box, _ in fragments]
+        solid_rects = [b.bounding_rect() for b in solid_boxes]
+
+        parent = list(range(n))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i: int, j: int) -> None:
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        def bridge_hits_solid(x1: float, y1: float, x2: float, y2: float) -> bool:
+            for sx, sy, sw, sh in solid_rects:
+                sx2, sy2 = sx + sw, sy + sh
+                if min(x2, sx2) > max(x1, sx) and min(y2, sy2) > max(y1, sy):
+                    return True
+            return False
+
+        for i in range(n):
+            ax, ay, aw, ah = rects[i]
+            ax2, ay2 = ax + aw, ay + ah
+            for j in range(i + 1, n):
+                bx, by, bw, bh = rects[j]
+                bx2, by2 = bx + bw, by + bh
+
+                ov_x = min(ax2, bx2) - max(ax, bx)
+                ov_y = min(ay2, by2) - max(ay, by)
+                gap_x = max(0.0, max(ax - bx2, bx - ax2))
+                gap_y = max(0.0, max(ay - by2, by - ay2))
+
+                # Vertical stacking (upright/upside-down receipt parts aligned along X).
+                min_w = max(1.0, min(aw, bw))
+                max_w = max(aw, bw)
+                max_gap_y = max(24.0, min(max_w * 0.72, max_dim * 0.085))
+                same_column = ov_x >= min_w * 0.25 and gap_y <= max_gap_y
+
+                # Horizontal stacking (sideways 90°/270° receipt parts aligned along Y).
+                min_h = max(1.0, min(ah, bh))
+                max_h = max(ah, bh)
+                max_gap_x = max(24.0, min(max_h * 0.72, max_dim * 0.085))
+                same_row = ov_y >= min_h * 0.25 and gap_x <= max_gap_x
+
+                if not (same_column or same_row):
+                    continue
+
+                ux1, uy1 = min(ax, bx), min(ay, by)
+                ux2, uy2 = max(ax2, bx2), max(ay2, by2)
+                if bridge_hits_solid(ux1, uy1, ux2, uy2):
+                    continue
+                union(i, j)
+
+        groups: dict[int, list[int]] = {}
+        for idx in range(n):
+            groups.setdefault(find(idx), []).append(idx)
+
+        work_gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
+        merged_pairs: list[tuple[RotatedCropBox, RotatedCropBox]] = []
+
+        for member_indices in groups.values():
+            all_pts = np.vstack([fragments[idx][1] for idx in member_indices])
+            rect = cv2.minAreaRect(all_pts)
+            cx, cy, rw, rh, angle_deg = _normalize_min_area_rect(rect)
+            if rw <= 0.0 or rh <= 0.0:
+                continue
+
+            raw_group = RotatedCropBox(
+                center_x=cx,
+                center_y=cy,
+                width=rw,
+                height=rh,
+                angle_deg=angle_deg,
+                confidence=0.85,
+                source_width=w,
+                source_height=h,
+            )
+            # Expand merged printed bounds to subtle physical paper-edge shadows (or clean padding).
+            expanded = self._expand_printed_group_to_paper_edges(work_gray, raw_group)
+            area_ratio = expanded.area / work_area
+            if area_ratio < self.config.min_area_ratio or area_ratio > self.config.max_area_ratio:
+                continue
+            if min(expanded.width, expanded.height) < min_side_work:
+                continue
+            merged_pairs.append((raw_group, expanded))
+
+        return merged_pairs
+
+    @staticmethod
+    def _expand_printed_group_to_paper_edges(
+        work_gray: np.ndarray,
+        box: RotatedCropBox,
+    ) -> RotatedCropBox:
+        """Snap a printed-fragment bounding box outward to faint paper edges or natural margins."""
+        h, w = work_gray.shape[:2]
+        max_dim = float(max(h, w))
+        short_side = min(box.width, box.height)
+        max_search = int(round(max(12.0, min(short_side * 0.30, max_dim * 0.055))))
+        default_pad = max(6.0, min(short_side * 0.09, max_dim * 0.018))
+
+        bx, by, bw, bh = box.bounding_rect()
+        x1 = max(0, int(round(bx)))
+        y1 = max(0, int(round(by)))
+        x2 = min(w - 1, int(round(bx + bw)))
+        y2 = min(h - 1, int(round(by + bh)))
+        if x2 <= x1 + 4 or y2 <= y1 + 4:
+            return box
+
+        def find_edge_offset(profile: np.ndarray) -> float | None:
+            if profile.size < 4:
+                return None
+            # Look for a subtle paper-edge drop shadow line (local darkening >= 4.0 gray levels
+            # or clear gradient jump >= 3.5) outside the printed ink bounds.
+            baseline = float(np.percentile(profile, 80))
+            drops = baseline - profile
+            grad = np.abs(np.diff(profile))
+            best_pos: int | None = None
+            best_strength = 0.0
+            for idx in range(2, len(profile) - 1):
+                drop = float(drops[idx])
+                g = float(grad[idx - 1])
+                strength = max(drop, g * 1.1)
+                if drop >= 4.0 or g >= 3.5:
+                    if strength > best_strength:
+                        best_strength = strength
+                        best_pos = idx
+            if best_pos is None:
+                return None
+            return float(best_pos)
+
+        # Sample outward mean intensity profiles along the 4 sides.
+        # Left (going outward toward 0)
+        l_start = max(0, x1 - max_search)
+        l_prof = (
+            np.mean(work_gray[y1 : y2 + 1, l_start : x1 + 1], axis=0)[::-1]
+            if x1 > l_start
+            else np.array([], dtype=np.float32)
+        )
+        # Right (going outward toward w-1)
+        r_end = min(w, x2 + max_search + 1)
+        r_prof = (
+            np.mean(work_gray[y1 : y2 + 1, x2:r_end], axis=0)
+            if r_end > x2 + 1
+            else np.array([], dtype=np.float32)
+        )
+        # Top (going outward toward 0)
+        t_start = max(0, y1 - max_search)
+        t_prof = (
+            np.mean(work_gray[t_start : y1 + 1, x1 : x2 + 1], axis=1)[::-1]
+            if y1 > t_start
+            else np.array([], dtype=np.float32)
+        )
+        # Bottom (going outward toward h-1)
+        b_end = min(h, y2 + max_search + 1)
+        b_prof = (
+            np.mean(work_gray[y2:b_end, x1 : x2 + 1], axis=1)
+            if b_end > y2 + 1
+            else np.array([], dtype=np.float32)
+        )
+
+        off_l = find_edge_offset(l_prof)
+        off_r = find_edge_offset(r_prof)
+        off_t = find_edge_offset(t_prof)
+        off_b = find_edge_offset(b_prof)
+
+        pad_l = min(float(x1), off_l if off_l is not None else default_pad)
+        pad_r = min(float(w - 1 - x2), off_r if off_r is not None else default_pad)
+        pad_t = min(float(y1), off_t if off_t is not None else default_pad)
+        pad_b = min(float(h - 1 - y2), off_b if off_b is not None else default_pad)
+
+        eff_cx, eff_cy, eff_w, eff_h, eff_angle = box.with_edge_margins(
+            top=pad_t, right=pad_r, bottom=pad_b, left=pad_l, unit="px"
+        ).resolved_geometry()
+        return RotatedCropBox(
+            center_x=eff_cx,
+            center_y=eff_cy,
+            width=min(float(w), eff_w),
+            height=min(float(h), eff_h),
+            angle_deg=eff_angle,
+            confidence=box.confidence,
+            source_width=w,
+            source_height=h,
+        )
+
     def _is_printed_content_on_full_page(
         self,
         work_bgr: np.ndarray,
@@ -1027,6 +1416,19 @@ class MultiDocumentDetector:
         bg_l = float(bg_lab[0])
         bg_chroma = math.hypot(float(bg_lab[1]) - 128.0, float(bg_lab[2]) - 128.0)
         if bg_l < 185.0 or bg_chroma > 24.0:
+            return False
+
+        # Require the union of detected printed boxes to span a substantial portion of the scan
+        # frame so a single small white receipt on a larger A3/A4 platen is NOT expanded to full.
+        all_corners = np.vstack([b.corners() * float(scale) for b in boxes])
+        ux1 = float(np.min(all_corners[:, 0]))
+        uy1 = float(np.min(all_corners[:, 1]))
+        ux2 = float(np.max(all_corners[:, 0]))
+        uy2 = float(np.max(all_corners[:, 1]))
+        union_w_ratio = (ux2 - ux1) / float(w)
+        union_h_ratio = (uy2 - uy1) / float(h)
+        union_area_ratio = union_w_ratio * union_h_ratio
+        if union_w_ratio < 0.50 or union_h_ratio < 0.50 or union_area_ratio < 0.30:
             return False
 
         rim_px = max(4, min(12, int(round(min(h, w) * 0.01))))
@@ -1114,7 +1516,16 @@ class MultiDocumentDetector:
         ink_drop = max(self.config.printed_border_ink_drop_l, bg_sigma * 6.0 + 25.0)
         ink_mask = (bg_l - interior_l) >= ink_drop
         ink_ratio = float(np.count_nonzero(ink_mask)) / float(interior_l.size)
-        return ink_ratio >= 0.0025
+        if ink_ratio < 0.0025:
+            return False
+
+        # Ensure the ink spans a broad portion of the page rather than one tiny corner slip.
+        ys, xs = np.nonzero(ink_mask)
+        if ys.size < 20:
+            return False
+        span_x = float(np.percentile(xs, 95) - np.percentile(xs, 5)) / float(interior_l.shape[1])
+        span_y = float(np.percentile(ys, 95) - np.percentile(ys, 5)) / float(interior_l.shape[0])
+        return span_x >= 0.40 and span_y >= 0.40
 
     @staticmethod
     def _fill_external_contours(binary_mask: np.ndarray) -> np.ndarray:

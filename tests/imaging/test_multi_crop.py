@@ -431,3 +431,106 @@ def test_white_sheet_with_inner_table_on_larger_white_platen_keeps_outer_paper_e
     assert abs(box.height - sheet_h) <= 18.0
     assert abs(box.angle_deg - 7.5) < 1.0
 
+
+def _draw_thermal_receipt(
+    canvas: np.ndarray,
+    *,
+    x0: int,
+    y0: int,
+    width: int = 160,
+    height: int = 500,
+    paper_bgr: tuple[int, int, int] = (252, 253, 253),
+    edge_shadow_bgr: tuple[int, int, int] = (224, 224, 224),
+) -> None:
+    """Draw a white thermal receipt with logo, header, items, and barcode across blank gaps."""
+    cv2.rectangle(canvas, (x0, y0), (x0 + width, y0 + height), paper_bgr, thickness=-1)
+    # Subtle paper edge shadow on one side (typical flatbed cover shadow on thin thermal paper).
+    cv2.line(canvas, (x0 + width, y0), (x0 + width, y0 + height), edge_shadow_bgr, thickness=2)
+
+    # 1) Top store logo block
+    cv2.circle(canvas, (x0 + 38, y0 + 52), 18, (35, 35, 35), thickness=-1)
+    cv2.rectangle(
+        canvas, (x0 + 66, y0 + 38), (x0 + width - 18, y0 + 64), (35, 35, 35), thickness=-1
+    )
+
+    # Blank gap (~26px), then 2) Store header text block
+    for dy in (94, 112, 130, 148):
+        cv2.rectangle(
+            canvas, (x0 + 18, y0 + dy), (x0 + width - 22, y0 + dy + 6), (45, 45, 45), thickness=-1
+        )
+
+    # Blank gap (~28px), then 3) Itemized lines
+    for dy in (184, 204, 224, 244, 264, 284):
+        cv2.rectangle(
+            canvas, (x0 + 18, y0 + dy), (x0 + width - 20, y0 + dy + 6), (40, 40, 40), thickness=-1
+        )
+
+    # Blank gap (~28px), then 4) Promo banner + barcode + QR block
+    cv2.rectangle(
+        canvas, (x0 + 14, y0 + 320), (x0 + width - 14, y0 + 362), (30, 30, 30), thickness=-1
+    )
+    for bx in range(x0 + 20, x0 + width - 20, 6):
+        cv2.line(canvas, (bx, y0 + 378), (bx, y0 + 420), (30, 30, 30), thickness=2)
+    cv2.rectangle(
+        canvas, (x0 + width - 64, y0 + 432), (x0 + width - 18, y0 + 478), (30, 30, 30), thickness=-1
+    )
+
+
+def test_single_white_thermal_receipt_with_blank_gaps_detected_as_one_box() -> None:
+    """One white thermal receipt with internal blank gaps must NOT split or expand to full A3."""
+    canvas = np.full((800, 1100, 3), (254, 254, 254), dtype=np.uint8)
+    _draw_thermal_receipt(canvas, x0=460, y0=130, width=160, height=500)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 1
+    box = boxes[0]
+    # Stay receipt-sized (not full 1100x800 platen) and cover from top logo to bottom QR.
+    assert 130.0 <= box.width <= 220.0
+    assert 430.0 <= box.height <= 560.0
+    assert abs(box.center_x - 540.0) <= 25.0
+    assert abs(box.center_y - 380.0) <= 30.0
+
+
+def test_multiple_white_and_colored_receipts_on_white_platen_detected_individually() -> None:
+    """Platen with a white receipt, white slip, and colored receipt detects exactly 3 boxes."""
+    canvas = np.full((800, 1100, 3), (254, 254, 254), dtype=np.uint8)
+
+    # 1) White guarantee slip on the left (title + body separated by blank space)
+    cv2.rectangle(canvas, (150, 260), (290, 286), (35, 35, 35), thickness=-1)
+    for dy in (314, 336, 358, 380, 412, 434):
+        cv2.rectangle(canvas, (110, dy), (320, dy + 8), (45, 45, 45), thickness=-1)
+
+    # 2) Long white thermal receipt in the center
+    _draw_thermal_receipt(canvas, x0=470, y0=120, width=155, height=500)
+
+    # 3) Light blue thermal receipt on the right
+    cv2.rectangle(canvas, (770, 240), (930, 560), (232, 232, 203), thickness=-1)
+    for dy in range(270, 530, 26):
+        cv2.rectangle(canvas, (790, dy), (910, dy + 6), (40, 40, 40), thickness=-1)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 3
+    # Verify center receipt covers the full height from logo to QR (~440..560px tall).
+    center_box = min(boxes, key=lambda b: abs(b.center_x - 547.0))
+    assert center_box.height >= 430.0
+    assert center_box.width <= 220.0
+
+
+def test_sideways_white_receipt_fragments_merge_along_horizontal_axis() -> None:
+    """A 90°-rotated white thermal receipt merges horizontally aligned fragments into 1 box."""
+    upright_canvas = np.full((800, 1100, 3), (254, 254, 254), dtype=np.uint8)
+    _draw_thermal_receipt(upright_canvas, x0=460, y0=130, width=160, height=500)
+    sideways = cv2.rotate(upright_canvas, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(sideways, dpi=100.0)
+
+    assert len(boxes) == 1
+    box = boxes[0]
+    assert 430.0 <= box.width <= 560.0
+    assert 130.0 <= box.height <= 220.0
+
