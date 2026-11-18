@@ -339,3 +339,95 @@ def test_sub_degree_projection_angle_refinement_without_outer_edges(
     assert method in {"hough", "projection", "hybrid"}
     assert abs(residual - fine_skew) < 0.35
 
+
+def test_full_page_white_a4_with_inner_table_keeps_full_paper_bounds() -> None:
+    """A4 full-page white scan with inner table must not shrink inward to the table box."""
+    rng = np.random.default_rng(123)
+    w, h = 827, 1169  # 100 DPI A4
+    base = np.full((h, w, 3), (247.0, 246.0, 242.0), dtype=np.float32)
+    noise = rng.normal(0.0, 1.8, size=base.shape).astype(np.float32)
+    canvas = np.clip(base + noise, 0, 255).astype(np.uint8)
+
+    # Printed header + shaded bordered table well inside A4 margins (like real Brother scan).
+    cv2.putText(
+        canvas,
+        "MOVING NOTICE GUIDE",
+        (90, 130),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.1,
+        (25, 25, 25),
+        3,
+        cv2.LINE_AA,
+    )
+    # Fill table area with light gray shading (similar to government notice forms).
+    cv2.rectangle(canvas, (85, 175), (w - 85, h - 110), (208, 212, 216), thickness=-1)
+    cv2.rectangle(canvas, (85, 175), (w - 85, h - 110), (35, 35, 35), thickness=3)
+    for row_y in range(255, h - 130, 80):
+        cv2.line(canvas, (85, row_y), (w - 85, row_y), (55, 55, 55), thickness=2)
+        cv2.putText(
+            canvas,
+            "Procedure details and required documents",
+            (110, row_y - 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (35, 35, 35),
+            2,
+            cv2.LINE_AA,
+        )
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 1
+    box = boxes[0]
+    assert box.width == pytest.approx(float(w), abs=2.0)
+    assert box.height == pytest.approx(float(h), abs=2.0)
+    assert box.center_x == pytest.approx(w * 0.5, abs=2.0)
+    assert box.center_y == pytest.approx(h * 0.5, abs=2.0)
+
+
+def test_full_page_white_a4_with_separated_text_blocks_does_not_over_split() -> None:
+    """Two separated printed blocks on one full-page white A4 sheet stay one full-page crop."""
+    w, h = 827, 1169
+    canvas = np.full((h, w, 3), (248, 248, 245), dtype=np.uint8)
+
+    # Top title block and lower table block separated by blank white space.
+    cv2.rectangle(canvas, (110, 90), (w - 110, 230), (30, 30, 30), thickness=3)
+    cv2.rectangle(canvas, (110, 420), (w - 110, 1020), (30, 30, 30), thickness=3)
+    for y in range(470, 1000, 60):
+        cv2.line(canvas, (110, y), (w - 110, y), (45, 45, 45), thickness=2)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 1
+    assert boxes[0].width == pytest.approx(float(w), abs=2.0)
+    assert boxes[0].height == pytest.approx(float(h), abs=2.0)
+
+
+def test_white_sheet_with_inner_table_on_larger_white_platen_keeps_outer_paper_edge() -> None:
+    """A smaller white sheet with outer shadow edge + inner dark table crops at the sheet edge."""
+    canvas = np.full((1200, 1600, 3), (249, 249, 249), dtype=np.uint8)
+
+    sheet_w, sheet_h = 520, 720
+    sheet = np.full((sheet_h, sheet_w, 3), (245, 245, 243), dtype=np.uint8)
+    # Subtle outer sheet boundary + inner dark printed table separated by white paper margins.
+    cv2.rectangle(sheet, (0, 0), (sheet_w - 1, sheet_h - 1), (212, 212, 212), thickness=2)
+    cv2.rectangle(sheet, (65, 80), (sheet_w - 65, sheet_h - 80), (30, 30, 30), thickness=3)
+    for y in range(150, sheet_h - 100, 65):
+        cv2.line(sheet, (65, y), (sheet_w - 65, y), (45, 45, 45), thickness=2)
+
+    _paste_rotated_document(
+        canvas, sheet, center=(800.0, 600.0), angle_deg=7.5, shadow_delta=22
+    )
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    assert len(boxes) == 1
+    box = boxes[0]
+    # Must match outer paper sheet (~520x720), NOT shrink to inner table (~390x560).
+    assert abs(box.width - sheet_w) <= 18.0
+    assert abs(box.height - sheet_h) <= 18.0
+    assert abs(box.angle_deg - 7.5) < 1.0
+

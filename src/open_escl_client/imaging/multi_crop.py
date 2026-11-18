@@ -696,6 +696,9 @@ class DetectionConfig:
     color_diff_mad_scale: float = 4.5
     use_edge_assist: bool = True
     overlap_containment_threshold: float = 0.65
+    full_page_paper_fallback: bool = True
+    paper_color_match_max_delta_e: float = 9.0
+    printed_border_ink_drop_l: float = 40.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -811,6 +814,24 @@ class MultiDocumentDetector:
         filtered = self._suppress_contained_boxes(candidates)
         if not filtered:
             return []
+
+        if self.config.full_page_paper_fallback and self._is_printed_content_on_full_page(
+            work_bgr, filtered, scale
+        ):
+            return [
+                RotatedCropBox(
+                    center_x=orig_w * 0.5,
+                    center_y=orig_h * 0.5,
+                    width=float(orig_w),
+                    height=float(orig_h),
+                    angle_deg=0.0,
+                    confidence=1.0,
+                    index=1,
+                    source_width=orig_w,
+                    source_height=orig_h,
+                    source_dpi=float(dpi),
+                )
+            ]
 
         if not self.config.multi_document:
             largest = max(filtered, key=lambda b: b.area)
@@ -937,7 +958,11 @@ class MultiDocumentDetector:
         edge_closed = cv2.morphologyEx(edge_mask, cv2.MORPH_CLOSE, edge_kernel)
         edge_filled = self._fill_external_contours(edge_closed)
 
-        # Add only edge-filled components that are not already covered by color_filled.
+        # Integrate edge-derived components:
+        # 1) Include components not detected by color_filled (e.g. white paper on white platen).
+        # 2) Also include rectangular outer paper contours that meaningfully enclose a smaller
+        #    color_filled region (e.g. printed text/tables inside a white sheet whose outer edge
+        #    was caught by Canny), without bloating dark/colored-paper masks that already match.
         edge_contours, _ = cv2.findContours(
             edge_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -949,11 +974,108 @@ class MultiDocumentDetector:
             comp_mask = np.zeros_like(color_filled)
             cv2.drawContours(comp_mask, [cnt], -1, 255, thickness=cv2.FILLED)
             overlap = float(np.count_nonzero(cv2.bitwise_and(comp_mask, color_filled)))
-            if overlap / area < 0.35:
+            overlap_ratio = overlap / area
+            if overlap_ratio < 0.35:
                 combined = cv2.bitwise_or(combined, comp_mask)
+                continue
+
+            # Check if this edge contour is a clean outer paper boundary enclosing inner ink.
+            if overlap_ratio < 0.88 and area >= overlap * 1.15:
+                _, (rw, rh), _ = cv2.minAreaRect(cnt)
+                rect_area = float(rw * rh)
+                if rect_area > 0.0 and (area / rect_area) >= 0.72:
+                    combined = cv2.bitwise_or(combined, comp_mask)
 
         combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, open_kernel)
         return self._fill_external_contours(combined)
+
+    def _is_printed_content_on_full_page(
+        self,
+        work_bgr: np.ndarray,
+        boxes: list[RotatedCropBox],
+        scale: float,
+    ) -> bool:
+        """Return True when all detected boxes are printed regions inside one full-page white sheet.
+
+        Prevents shrinking an A4 (or other selected full-page paper size) scan inward onto
+        internal tables or text blocks when the paper's white margins blend into the scan
+        frame border with no distinct outer paper-edge boundary.
+        """
+        if not boxes:
+            return False
+
+        h, w = work_bgr.shape[:2]
+        lab = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2LAB)
+        bg_lab, _ = self._estimate_background_stats(lab)
+
+        # Only applies when image borders look like bright neutral white/off-white paper.
+        bg_l = float(bg_lab[0])
+        bg_chroma = math.hypot(float(bg_lab[1]) - 128.0, float(bg_lab[2]) - 128.0)
+        if bg_l < 185.0 or bg_chroma > 24.0:
+            return False
+
+        rim_px = max(4, min(12, int(round(min(h, w) * 0.01))))
+        rim_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (rim_px * 2 + 1, rim_px * 2 + 1))
+
+        for box in boxes:
+            pts = box.corners() * float(scale)
+            poly = np.round(pts).astype(np.int32)
+            box_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillConvexPoly(box_mask, poly, 255)
+            inside_pixels = lab[box_mask > 0].astype(np.float32)
+            if len(inside_pixels) < 50:
+                return False
+
+            # Check if the box boundary sits directly on dark printed ink (text/table rules)
+            # rather than on a physical paper edge surrounded by blank paper margins.
+            eroded = cv2.erode(box_mask, rim_kernel)
+            inner_rim = cv2.subtract(box_mask, eroded)
+            rim_l = lab[:, :, 0][inner_rim > 0].astype(np.float32)
+            if rim_l.size == 0:
+                return False
+
+            dark_ink_mask = (bg_l - rim_l) >= self.config.printed_border_ink_drop_l
+            ink_ratio = float(np.count_nonzero(dark_ink_mask)) / float(rim_l.size)
+            if ink_ratio < 0.03:
+                return False
+
+            # Estimate the unprinted surface color inside the detected box using its
+            # brightest luminance tail (excluding dark ink strokes).
+            l_cutoff = float(np.percentile(inside_pixels[:, 0], 88))
+            bright_inside = inside_pixels[inside_pixels[:, 0] >= l_cutoff]
+            if len(bright_inside) == 0:
+                return False
+            paper_lab = np.median(bright_inside, axis=0)
+            paper_l = float(paper_lab[0])
+            paper_chroma = math.hypot(
+                float(paper_lab[1]) - 128.0, float(paper_lab[2]) - 128.0
+            )
+            delta_e_paper = float(
+                math.sqrt(
+                    ((paper_l - bg_l) * 1.15) ** 2
+                    + (float(paper_lab[1]) - float(bg_lab[1])) ** 2
+                    + (float(paper_lab[2]) - float(bg_lab[2])) ** 2
+                )
+            )
+            if delta_e_paper <= self.config.paper_color_match_max_delta_e:
+                continue
+
+            # Also handle forms whose entire inner table is shaded light neutral gray
+            # with a dark printed border sitting near-axis-aligned inside the full page.
+            width_ratio = (box.width * float(scale)) / float(w)
+            height_ratio = (box.height * float(scale)) / float(h)
+            is_shaded_neutral_table = (
+                paper_l >= 180.0
+                and paper_chroma <= 15.0
+                and abs(box.angle_deg) <= 5.0
+                and width_ratio >= 0.50
+                and height_ratio >= 0.50
+                and ink_ratio >= 0.08
+            )
+            if not is_shaded_neutral_table:
+                return False
+
+        return True
 
     @staticmethod
     def _fill_external_contours(binary_mask: np.ndarray) -> np.ndarray:
