@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 import img2pdf
-from PIL import Image
+from PIL import Image, ImageOps
 
 from open_escl_client.config.user_config import normalize_save_format
 
@@ -46,12 +46,13 @@ class ExportResult:
 
 
 def _to_pil_image(image_data: bytes | Image.Image) -> Image.Image:
-    """Load raw image bytes into a Pillow `Image`, or copy an existing `Image`."""
+    """Load raw image bytes into an EXIF-normalized Pillow `Image`, or copy an existing `Image`."""
     if isinstance(image_data, Image.Image):
         return image_data.copy()
     with Image.open(BytesIO(image_data)) as img:
         img.load()
-        return img.copy()
+        transposed = ImageOps.exif_transpose(img)
+        return transposed.copy()
 
 
 def _prepare_for_jpeg(img: Image.Image) -> Image.Image:

@@ -41,6 +41,8 @@ def test_main_qml_and_component_files_exist() -> None:
     assert MAIN_QML_PATH.is_file()
     assert (QML_DIR / "PaperPlacementPreview.qml").is_file()
     assert (QML_DIR / "SaveSettingsPanel.qml").is_file()
+    assert (QML_DIR / "CropOverlay.qml").is_file()
+    assert (QML_DIR / "CropSettingsPanel.qml").is_file()
 
 
 def test_qml_engine_loads_main_window_and_components() -> None:
@@ -70,6 +72,17 @@ def test_qml_engine_loads_main_window_and_components() -> None:
     assert root.findChild(QObject, "multipagePdfCheckBox") is not None
     assert root.findChild(QObject, "previewArea") is not None
     assert root.findChild(QObject, "previewCanvasImage") is not None
+    assert root.findChild(QObject, "cropOverlay") is not None
+    assert root.findChild(QObject, "cropThumbnailsStrip") is not None
+    assert root.findChild(QObject, "cropSettingsPanel") is not None
+    assert root.findChild(QObject, "autoCropCheckBox") is not None
+    assert root.findChild(QObject, "multiDocumentCheckBox") is not None
+    assert root.findChild(QObject, "autoOrientationCheckBox") is not None
+    assert root.findChild(QObject, "cropMarginSlider") is not None
+    assert root.findChild(QObject, "fineAngleSlider") is not None
+    assert root.findChild(QObject, "rotateLeftButton") is not None
+    assert root.findChild(QObject, "rotateRightButton") is not None
+    assert root.findChild(QObject, "redetectCropButton") is not None
     assert root.findChild(QObject, "busyOverlay") is not None
     assert root.findChild(QObject, "actionToolbar") is not None
     assert root.findChild(QObject, "savedCountLabel") is not None
@@ -348,3 +361,276 @@ def test_viewmodel_add_manual_scanner_by_ip() -> None:
     mock_fetcher.assert_called_once_with("http://192.168.1.50:80/eSCL/ScannerCapabilities")
     assert "Brother MFC-L2750DW series" in vm.selectedScanner
     assert "接続完了" in vm.statusMessage
+
+
+def test_preview_crop_overlay_adjustments_and_rotation_ui_binding() -> None:
+    """Preview with 2 rotated docs populates CropOverlay, thumbnails, and interactive controls."""
+    import cv2
+    import numpy as np
+    from PySide6.QtCore import QSize
+
+    from open_escl_client.imaging.multi_crop import encode_image_bytes
+    from open_escl_client.imaging.orientation import (
+        AutoOrientationCorrector,
+        HeuristicOrientationBackend,
+        OrientationConfig,
+    )
+
+    _ensure_qapp()
+
+    # Build a synthetic platen preview containing 2 clearly separated documents.
+    canvas = np.full((800, 1000, 3), (30, 30, 32), dtype=np.uint8)
+    doc1 = np.full((340, 260, 3), (245, 245, 242), dtype=np.uint8)
+    cv2.putText(doc1, "DOC 1", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (25, 25, 25), 2)
+    doc2 = np.full((300, 360, 3), (242, 244, 248), dtype=np.uint8)
+    cv2.putText(doc2, "DOC 2", (30, 90), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (25, 25, 25), 2)
+
+    canvas[120:460, 110:370] = doc1
+    canvas[260:560, 520:880] = doc2
+    preview_jpeg = encode_image_bytes(canvas, fmt="JPEG", quality=92)
+
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+    mock_scan_client = MagicMock()
+    mock_scan_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_jpeg,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        preview_service=PreviewScanService(scan_client_factory=lambda _url: mock_scan_client),
+        orientation_corrector=AutoOrientationCorrector(
+            config=OrientationConfig(prefer_native_backend=False),
+            backends=[HeuristicOrientationBackend()],
+        ),
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+
+    overlay = root.findChild(QObject, "cropOverlay")
+    thumb_strip = root.findChild(QObject, "cropThumbnailsStrip")
+    assert overlay is not None
+    assert thumb_strip is not None
+    assert overlay.property("visible") is False
+
+    vm.requestPreview()
+
+    assert vm.cropCount == 2
+    assert overlay.property("visible") is True
+    assert thumb_strip.property("visible") is True
+
+    boxes_initial = vm.cropBoxes
+    assert len(boxes_initial) == 2
+    assert boxes_initial[0]["index"] == 1
+    assert boxes_initial[1]["index"] == 2
+    assert str(boxes_initial[0]["thumbnailUrl"]).startswith("image://preview/crop/1/")
+
+    # Verify PreviewImageProvider actually serves the generated crop thumbnail QImage.
+    thumb_id = str(boxes_initial[0]["thumbnailUrl"]).removeprefix("image://preview/")
+    qimg = vm.image_provider.requestImage(thumb_id, QSize(), QSize())
+    assert not qimg.isNull()
+    assert qimg.width() > 20 and qimg.height() > 20
+
+    # Uniform negative margin shrinks cropped width/height.
+    orig_w = int(boxes_initial[0]["widthPx"])
+    vm.cropMarginMm = -2.0
+    assert int(vm.cropBoxes[0]["widthPx"]) < orig_w
+
+    # Select second crop box and apply manual fine angle + 90° CW/CCW rotations.
+    vm.selectCropBox(1)
+    assert vm.selectedCropIndex == 1
+    vm.setSelectedCropFineAngle(2.5)
+    assert vm.selectedCropFineAngle == 2.5
+
+    rot_before = vm.selectedCropRotationDeg
+    vm.rotateSelectedCropRight()
+    assert vm.selectedCropRotationDeg == (rot_before + 90) % 360
+    vm.rotateSelectedCropLeft()
+    assert vm.selectedCropRotationDeg == rot_before
+
+    # Move & corner drag update normalized geometry.
+    cx_before = float(vm.cropBoxes[1]["centerXNorm"])
+    vm.moveCropBoxByNorm(1, 0.02, -0.01)
+    assert float(vm.cropBoxes[1]["centerXNorm"]) > cx_before
+
+    vm.dragCropCornerToNorm(1, 0, 0.48, 0.22)
+    assert len(vm.cropBoxes[1]["cornersNorm"]) == 4
+
+    # Reset restores manual fine angle to 0.0.
+    vm.resetSelectedCropAdjustments()
+    assert vm.selectedCropFineAngle == 0.0
+
+    # Toggling autoCropEnabled hides overlay and toggling back re-detects.
+    vm.autoCropEnabled = False
+    assert vm.cropCount == 0
+    assert overlay.property("visible") is False
+
+    vm.autoCropEnabled = True
+    assert vm.cropCount == 2
+    assert overlay.property("visible") is True
+
+    # Single-document mode detects only 1 box.
+    vm.multiDocumentEnabled = False
+    assert vm.cropCount == 1
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+def test_viewmodel_preview_adjust_then_multi_crop_scan_and_save(tmp_path: Path) -> None:
+    """ViewModel connects preview-adjusted multi-crop boxes into main scan & save pipeline."""
+    import cv2
+    import numpy as np
+
+    from open_escl_client.imaging.multi_crop import encode_image_bytes
+    from open_escl_client.imaging.orientation import (
+        AutoOrientationCorrector,
+        HeuristicOrientationBackend,
+        OrientationConfig,
+    )
+
+    _ensure_qapp()
+    save_dir = tmp_path / "MultiOut"
+
+    canvas = np.full((800, 1000, 3), (28, 28, 30), dtype=np.uint8)
+    cv2.rectangle(canvas, (100, 140), (380, 620), (245, 245, 242), thickness=-1)
+    cv2.rectangle(canvas, (540, 180), (900, 620), (242, 244, 248), thickness=-1)
+    scan_jpeg = encode_image_bytes(canvas, fmt="JPEG", quality=92)
+
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+    mock_scan_client = MagicMock()
+    mock_scan_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=scan_jpeg,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_scan_client,
+        orientation_corrector=AutoOrientationCorrector(
+            config=OrientationConfig(prefer_native_backend=False),
+            backends=[HeuristicOrientationBackend()],
+        ),
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.setSaveDirectoryFromUrl(save_dir.as_uri())
+    vm.namingRule = "Multi_{seq:03d}"
+    vm.selectedSaveFormat = "PNG"
+
+    # 1) Fast preview detects 2 documents; rotate doc #1 manually by 90° CW.
+    vm.requestPreview()
+    assert vm.cropCount == 2
+    vm.selectCropBox(0)
+    vm.rotateSelectedCropRight()
+
+    # 2) Main scan & save exports 2 sequential files with box #1 rotated to landscape.
+    vm.requestScanAndSave()
+    assert vm.savedFileCount == 2
+    assert (save_dir / "Multi_001.png").is_file()
+    assert (save_dir / "Multi_002.png").is_file()
+    assert "2件を一括保存" in vm.statusMessage
+
+    with Image.open(save_dir / "Multi_001.png") as img1:
+        assert img1.width > img1.height
+
+    # 3) Second continuous scan auto-detects again and continues sequence 003, 004.
+    vm.requestScanAndSave()
+    assert vm.savedFileCount == 4
+    assert (save_dir / "Multi_003.png").is_file()
+    assert (save_dir / "Multi_004.png").is_file()
+
+
+def test_viewmodel_auto_90_rotation_reflects_in_saved_jpeg_and_syncs_preview_state(
+    tmp_path: Path,
+) -> None:
+    """Preview-detected 90° CW auto-rotation is applied to saved JPEG and synced back to preview."""
+    import cv2
+    import numpy as np
+
+    from open_escl_client.imaging.multi_crop import encode_image_bytes
+    from open_escl_client.imaging.orientation import (
+        AutoOrientationCorrector,
+        HeuristicOrientationBackend,
+        OrientationConfig,
+        rotate_image_cw,
+    )
+
+    _ensure_qapp()
+    save_dir = tmp_path / "RotatedOut"
+
+    # Create upright portrait A4-like document, then rotate 270° CW (90° CCW) so it needs 90° CW.
+    upright = np.full((760, 540, 3), (247, 246, 242), dtype=np.uint8)
+    lines = [
+        ("OFFICIAL NOTICE", 0.95),
+        ("Date: 2026-11-18", 0.65),
+        ("Section 1: Registration", 0.62),
+        ("Section 2: Insurance", 0.62),
+        ("Section 3: Pension", 0.62),
+        ("Total:", 0.65),
+        ("Done.", 0.62),
+    ]
+    y = 90
+    for text, scale in lines:
+        cv2.putText(
+            upright, text, (45, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (25, 25, 25), 2, cv2.LINE_AA
+        )
+        y += 75
+    sideways = rotate_image_cw(upright, 270)
+    assert sideways.shape[1] > sideways.shape[0]
+    sideways_jpeg = encode_image_bytes(sideways, fmt="JPEG", quality=92)
+
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+    mock_scan_client = MagicMock()
+    mock_scan_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=sideways_jpeg,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_scan_client,
+        orientation_corrector=AutoOrientationCorrector(
+            config=OrientationConfig(prefer_native_backend=False, min_confidence=0.2),
+            backends=[HeuristicOrientationBackend()],
+        ),
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.setSaveDirectoryFromUrl(save_dir.as_uri())
+    vm.namingRule = "AutoRot_{seq:03d}"
+    vm.selectedSaveFormat = "JPEG"
+
+    # Preview detects full-page A4 with 90° CW auto-rotation.
+    vm.requestPreview()
+    assert vm.cropCount == 1
+    assert vm.cropBoxes[0]["effectiveRotationDeg"] == 90
+
+    # Save must produce an upright portrait JPEG and update preview dimensions & status message.
+    vm.requestScanAndSave()
+    out1 = save_dir / "AutoRot_001.jpg"
+    assert out1.is_file()
+    assert "回転 90°" in vm.statusMessage
+    with Image.open(out1) as img1:
+        assert img1.height > img1.width
+    assert vm.previewImageHeight > vm.previewImageWidth
+
+    # Continuous 2nd scan without re-previewing must also save an upright portrait JPEG.
+    vm.requestScanAndSave()
+    out2 = save_dir / "AutoRot_002.jpg"
+    assert out2.is_file()
+    with Image.open(out2) as img2:
+        assert img2.height > img2.width
