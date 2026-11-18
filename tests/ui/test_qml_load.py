@@ -482,3 +482,70 @@ def test_preview_crop_overlay_adjustments_and_rotation_ui_binding() -> None:
     for obj in engine.rootObjects():
         obj.deleteLater()
     engine.deleteLater()
+
+
+def test_viewmodel_preview_adjust_then_multi_crop_scan_and_save(tmp_path: Path) -> None:
+    """ViewModel connects preview-adjusted multi-crop boxes into main scan & save pipeline."""
+    import cv2
+    import numpy as np
+
+    from open_escl_client.imaging.multi_crop import encode_image_bytes
+    from open_escl_client.imaging.orientation import (
+        AutoOrientationCorrector,
+        HeuristicOrientationBackend,
+        OrientationConfig,
+    )
+
+    _ensure_qapp()
+    save_dir = tmp_path / "MultiOut"
+
+    canvas = np.full((800, 1000, 3), (28, 28, 30), dtype=np.uint8)
+    cv2.rectangle(canvas, (100, 140), (380, 620), (245, 245, 242), thickness=-1)
+    cv2.rectangle(canvas, (540, 180), (900, 620), (242, 244, 248), thickness=-1)
+    scan_jpeg = encode_image_bytes(canvas, fmt="JPEG", quality=92)
+
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+    mock_scan_client = MagicMock()
+    mock_scan_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=scan_jpeg,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_scan_client,
+        orientation_corrector=AutoOrientationCorrector(
+            config=OrientationConfig(prefer_native_backend=False),
+            backends=[HeuristicOrientationBackend()],
+        ),
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.setSaveDirectoryFromUrl(save_dir.as_uri())
+    vm.namingRule = "Multi_{seq:03d}"
+    vm.selectedSaveFormat = "PNG"
+
+    # 1) Fast preview detects 2 documents; rotate doc #1 manually by 90° CW.
+    vm.requestPreview()
+    assert vm.cropCount == 2
+    vm.selectCropBox(0)
+    vm.rotateSelectedCropRight()
+
+    # 2) Main scan & save exports 2 sequential files with box #1 rotated to landscape.
+    vm.requestScanAndSave()
+    assert vm.savedFileCount == 2
+    assert (save_dir / "Multi_001.png").is_file()
+    assert (save_dir / "Multi_002.png").is_file()
+    assert "2件を一括保存" in vm.statusMessage
+
+    with Image.open(save_dir / "Multi_001.png") as img1:
+        assert img1.width > img1.height
+
+    # 3) Second continuous scan auto-detects again and continues sequence 003, 004.
+    vm.requestScanAndSave()
+    assert vm.savedFileCount == 4
+    assert (save_dir / "Multi_003.png").is_file()
+    assert (save_dir / "Multi_004.png").is_file()

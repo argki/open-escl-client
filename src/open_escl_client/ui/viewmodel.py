@@ -51,6 +51,10 @@ from open_escl_client.imaging.orientation import (
     AutoOrientationCorrector,
     rotate_image_cw,
 )
+from open_escl_client.imaging.pipeline import (
+    MultiCropPipelineConfig,
+    MultiCropScanPipeline,
+)
 from open_escl_client.ui.image_provider import PreviewImageProvider
 
 INPUT_SOURCE_LABELS: dict[InputSourceKind, str] = {
@@ -217,6 +221,7 @@ class AppViewModel(QObject):
         self._crop_boxes: list[RotatedCropBox] = []
         self._crop_thumbnail_urls: dict[int, str] = {}
         self._selected_crop_index: int = -1
+        self._preview_boxes_ready_for_save: bool = False
 
         self._continuous_session: ContinuousScanSession | None = None
         self._saved_file_count: int = 0
@@ -706,6 +711,7 @@ class AppViewModel(QObject):
 
         self._crop_boxes = analyzed
         self._selected_crop_index = 0 if analyzed else -1
+        self._preview_boxes_ready_for_save = bool(analyzed)
         self.cropBoxesChanged.emit()
 
     @Slot(int)
@@ -1051,6 +1057,30 @@ class AppViewModel(QObject):
         paper_opt = self.current_paper_size_option
         if paper_opt is None:
             paper_opt = self._paper_size_resolver.resolve_for_source(active_caps)[0]
+
+        post_processor = None
+        if self._auto_crop_enabled or self._auto_orientation_enabled:
+            pipeline = MultiCropScanPipeline(
+                MultiCropPipelineConfig(
+                    auto_crop_enabled=self._auto_crop_enabled,
+                    multi_document_enabled=self._multi_document_enabled,
+                    auto_orientation_enabled=self._auto_orientation_enabled,
+                    margin_mm=self._crop_margin_mm,
+                    target_dpi=float(self._selected_resolution),
+                ),
+                deskew_processor=self._deskew_processor,
+                orientation_corrector=self._orientation_corrector,
+            )
+            confirmed_boxes = (
+                list(self._crop_boxes)
+                if (self._auto_crop_enabled and self._preview_boxes_ready_for_save and self._crop_boxes)
+                else None
+            )
+            post_processor = pipeline.as_post_processor(
+                preview_boxes=confirmed_boxes,
+                consume_preview_boxes_once=True,
+            )
+
         return ScanSaveProfile(
             base_url=scanner.base_url,
             source_caps=active_caps,
@@ -1061,6 +1091,7 @@ class AppViewModel(QObject):
             resolution_dpi=self._selected_resolution,
             quality=self._jpeg_quality,
             multipage_pdf=self._multipage_pdf,
+            post_processor=post_processor,
         )
 
     def _on_scan_save_finished(self, result_obj: object) -> None:
@@ -1069,7 +1100,12 @@ class AppViewModel(QObject):
             self.set_status_message("スキャンをキャンセルしました")
             return
 
-        # Show the newly scanned image on the preview canvas as immediate visual confirmation
+        # Preview boxes were consumed by this main scan; subsequent continuous scans
+        # will auto-detect freshly placed documents unless the user previews again.
+        self._preview_boxes_ready_for_save = False
+        self._clear_crop_boxes()
+
+        # Show the newly scanned & processed image on the preview canvas as confirmation
         try:
             url = self._image_provider.update_image_bytes(result_obj.last_image_bytes)
             self._preview_image_url = url
@@ -1091,11 +1127,19 @@ class AppViewModel(QObject):
         self._saved_file_count = result_obj.total_saved_files
         self._pending_pdf_page_count = result_obj.buffered_page_count
         if result_obj.saved_results:
+            saved_count = len(result_obj.saved_results)
+            first_name = result_obj.saved_results[0].output_path.name
             last_path = result_obj.saved_results[-1].output_path
             self._last_saved_file_name = last_path.name
-            self.set_status_message(
-                f"保存完了 ({self._saved_file_count}件目): {last_path} — 次の原稿を置いて続けてスキャンできます"
-            )
+            if saved_count > 1:
+                self.set_status_message(
+                    f"{saved_count}件を一括保存しました (累計 {self._saved_file_count}件): "
+                    f"{first_name} 〜 {last_path.name} — 次の原稿を置いて続けてスキャンできます"
+                )
+            else:
+                self.set_status_message(
+                    f"保存完了 ({self._saved_file_count}件目): {last_path} — 次の原稿を置いて続けてスキャンできます"
+                )
         else:
             self.set_status_message(
                 f"マルチページPDFに {self._pending_pdf_page_count} ページ目を追加しました（続けてスキャン、または「PDFを保存して完了」）"

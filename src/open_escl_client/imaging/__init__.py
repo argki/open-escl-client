@@ -33,6 +33,11 @@ from open_escl_client.imaging.orientation import (
     OrientationResult,
     rotate_image_cw,
 )
+from open_escl_client.imaging.pipeline import (
+    MultiCropPipelineConfig,
+    MultiCropScanPipeline,
+    ProcessedDocument,
+)
 
 __all__ = [
     "AutoOrientationCorrector",
@@ -47,12 +52,15 @@ __all__ = [
     "MM_PER_INCH",
     "MacOSVisionOrientationBackend",
     "MarginUnit",
+    "MultiCropPipelineConfig",
+    "MultiCropScanPipeline",
     "MultiDocumentDetector",
     "NormalizedCropBox",
     "OrientationConfig",
     "OrientationDetectorBackend",
     "OrientationEstimate",
     "OrientationResult",
+    "ProcessedDocument",
     "RotatedCropBox",
     "RotationDeg",
     "VALID_ROTATIONS",
