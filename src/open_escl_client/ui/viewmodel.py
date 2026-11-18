@@ -42,10 +42,13 @@ from open_escl_client.imaging.multi_crop import (
     CropMarginOffsets,
     DeskewCropProcessor,
     DetectionConfig,
+    DetectionPreset,
     MultiDocumentDetector,
+    ResolvedDetectionPreset,
     RotatedCropBox,
     decode_image_bytes,
     encode_image_bytes,
+    normalize_detection_preset,
 )
 from open_escl_client.imaging.orientation import (
     AutoOrientationCorrector,
@@ -64,6 +67,23 @@ INPUT_SOURCE_LABELS: dict[InputSourceKind, str] = {
 }
 
 LABEL_TO_INPUT_SOURCE: dict[str, InputSourceKind] = {v: k for k, v in INPUT_SOURCE_LABELS.items()}
+
+DETECTION_PRESET_LABELS: dict[DetectionPreset, str] = {
+    "auto": "自動判別 (推奨)",
+    "receipt_multi": "レシート・複数小原稿",
+    "standard_sheet": "単票・定型紙 (A3内のA4等)",
+    "full_page": "スキャン範囲全面",
+}
+
+LABEL_TO_DETECTION_PRESET: dict[str, DetectionPreset] = {
+    v: k for k, v in DETECTION_PRESET_LABELS.items()
+}
+
+RESOLVED_PRESET_SHORT_LABELS: dict[ResolvedDetectionPreset, str] = {
+    "receipt_multi": "レシート・複数小原稿",
+    "standard_sheet": "単票・定型紙 (A3内のA4等)",
+    "full_page": "スキャン範囲全面",
+}
 
 DEFAULT_PLATEN_CAPS = InputSourceCaps(
     source=InputSourceKind.PLATEN,
@@ -217,6 +237,8 @@ class AppViewModel(QObject):
         self._auto_crop_enabled: bool = True
         self._multi_document_enabled: bool = True
         self._auto_orientation_enabled: bool = True
+        self._detection_preset: DetectionPreset = "auto"
+        self._resolved_detection_preset: ResolvedDetectionPreset = "receipt_multi"
         self._crop_margin_mm: float = 0.0
         self._crop_boxes: list[RotatedCropBox] = []
         self._crop_thumbnail_urls: dict[int, str] = {}
@@ -532,6 +554,53 @@ class AppViewModel(QObject):
             if self._preview_bgr is not None and self._auto_crop_enabled:
                 self._analyze_preview_crops()
 
+    @Property("QStringList", constant=True)
+    def detectionPresets(self) -> list[str]:
+        return list(DETECTION_PRESET_LABELS.values())
+
+    @Property(str, notify=cropSettingsChanged)
+    def selectedDetectionPreset(self) -> str:
+        return DETECTION_PRESET_LABELS.get(
+            self._detection_preset, DETECTION_PRESET_LABELS["auto"]
+        )
+
+    @selectedDetectionPreset.setter
+    def selectedDetectionPreset(self, value: str) -> None:
+        preset = LABEL_TO_DETECTION_PRESET.get(value)
+        if preset is None:
+            preset = normalize_detection_preset(value)
+        if self._detection_preset != preset:
+            self._detection_preset = preset
+            self.cropSettingsChanged.emit()
+            if self._preview_bgr is not None and self._auto_crop_enabled:
+                self._analyze_preview_crops()
+
+    @Property(str, notify=cropSettingsChanged)
+    def detectionPresetCode(self) -> str:
+        return self._detection_preset
+
+    @detectionPresetCode.setter
+    def detectionPresetCode(self, value: str) -> None:
+        preset = LABEL_TO_DETECTION_PRESET.get(value) or normalize_detection_preset(value)
+        if self._detection_preset != preset:
+            self._detection_preset = preset
+            self.cropSettingsChanged.emit()
+            if self._preview_bgr is not None and self._auto_crop_enabled:
+                self._analyze_preview_crops()
+
+    @Property(str, notify=cropBoxesChanged)
+    def resolvedDetectionPreset(self) -> str:
+        return self._resolved_detection_preset
+
+    @Property(str, notify=cropBoxesChanged)
+    def resolvedDetectionPresetLabel(self) -> str:
+        short = RESOLVED_PRESET_SHORT_LABELS.get(
+            self._resolved_detection_preset, self._resolved_detection_preset
+        )
+        if self._detection_preset == "auto":
+            return f"自動採用: {short}"
+        return f"手動指定: {short}"
+
     @Property(float, notify=cropSettingsChanged)
     def cropMarginMm(self) -> float:
         return self._crop_margin_mm
@@ -676,9 +745,13 @@ class AppViewModel(QObject):
 
         dpi = float(self._preview_session.preview_dpi)
         detector = MultiDocumentDetector(
-            DetectionConfig(multi_document=self._multi_document_enabled)
+            DetectionConfig(
+                multi_document=self._multi_document_enabled,
+                detection_preset=self._detection_preset,
+            )
         )
         detected = detector.detect(self._preview_bgr, dpi=dpi)
+        self._resolved_detection_preset = detector.last_resolved_preset
         if not detected:
             self._clear_crop_boxes()
             return
@@ -1073,6 +1146,7 @@ class AppViewModel(QObject):
                     auto_crop_enabled=self._auto_crop_enabled,
                     multi_document_enabled=self._multi_document_enabled,
                     auto_orientation_enabled=self._auto_orientation_enabled,
+                    detection_preset=self._detection_preset,
                     margin_mm=self._crop_margin_mm,
                     target_dpi=float(self._selected_resolution),
                 ),

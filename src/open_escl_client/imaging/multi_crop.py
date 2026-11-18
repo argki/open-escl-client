@@ -17,12 +17,33 @@ import cv2
 import numpy as np
 
 BackgroundMode = Literal["auto", "light", "dark"]
+DetectionPreset = Literal["auto", "receipt_multi", "standard_sheet", "full_page"]
+ResolvedDetectionPreset = Literal["receipt_multi", "standard_sheet", "full_page"]
 RotationDeg = Literal[0, 90, 180, 270]
 MarginUnit = Literal["mm", "px"]
 EdgeName = Literal["top", "right", "bottom", "left"]
 
+VALID_DETECTION_PRESETS: tuple[DetectionPreset, ...] = (
+    "auto",
+    "receipt_multi",
+    "standard_sheet",
+    "full_page",
+)
+
 MM_PER_INCH = 25.4
 MIN_CROP_SIDE_PX = 4.0
+
+
+def normalize_detection_preset(preset: str) -> DetectionPreset:
+    """Normalize a detection preset string into a valid `DetectionPreset` literal."""
+    cleaned = str(preset).strip().lower()
+    if cleaned == "receipt_multi":
+        return "receipt_multi"
+    if cleaned == "standard_sheet":
+        return "standard_sheet"
+    if cleaned == "full_page":
+        return "full_page"
+    return "auto"
 
 
 def mm_to_px(mm: float, dpi: float) -> float:
@@ -686,6 +707,7 @@ class DetectionConfig:
     """Parameters controlling multi-document region detection."""
 
     background_mode: BackgroundMode = "auto"
+    detection_preset: DetectionPreset = "auto"
     multi_document: bool = True
     min_area_ratio: float = 0.004
     max_area_ratio: float = 0.985
@@ -733,6 +755,12 @@ class MultiDocumentDetector:
 
     def __init__(self, config: DetectionConfig | None = None) -> None:
         self.config = config or DetectionConfig()
+        self._last_resolved_preset: ResolvedDetectionPreset = "receipt_multi"
+
+    @property
+    def last_resolved_preset(self) -> ResolvedDetectionPreset:
+        """Return the concrete detection preset selected by the most recent `detect()` call."""
+        return self._last_resolved_preset
 
     def detect(
         self,
@@ -752,6 +780,24 @@ class MultiDocumentDetector:
         """
         bgr = _ensure_bgr(decode_image_bytes(image) if isinstance(image, bytes) else image)
         orig_h, orig_w = bgr.shape[:2]
+        preset = normalize_detection_preset(self.config.detection_preset)
+
+        if preset == "full_page":
+            self._last_resolved_preset = "full_page"
+            return [
+                RotatedCropBox(
+                    center_x=orig_w * 0.5,
+                    center_y=orig_h * 0.5,
+                    width=float(orig_w),
+                    height=float(orig_h),
+                    angle_deg=0.0,
+                    confidence=1.0,
+                    index=1,
+                    source_width=orig_w,
+                    source_height=orig_h,
+                    source_dpi=float(dpi),
+                )
+            ]
 
         scale = 1.0
         max_dim = max(orig_h, orig_w)
@@ -851,6 +897,8 @@ class MultiDocumentDetector:
 
         merged_printed: list[RotatedCropBox] = []
         merged_printed_raw: list[RotatedCropBox] = []
+        merged_pairs: list[tuple[RotatedCropBox, RotatedCropBox]] = []
+        solid_work_boxes: list[RotatedCropBox] = []
         if printed_fragments:
             solid_work_boxes = [
                 RotatedCropBox(
@@ -901,14 +949,54 @@ class MultiDocumentDetector:
                     )
                 )
 
-        # Evaluate full-page paper fallback using unpadded boxes so inner printed boundaries
-        # (table borders / text edges) are inspected directly before outer margin padding.
+        # Explicit `receipt_multi` preset: preserve the exact receipt & multi-slip pipeline
+        # without any full-page fallback or standard-sheet override.
+        if preset == "receipt_multi":
+            self._last_resolved_preset = "receipt_multi"
+            candidates = solid_candidates + merged_printed
+            filtered = self._suppress_contained_boxes(candidates)
+            if not filtered:
+                return []
+            if not self.config.multi_document:
+                largest = max(filtered, key=lambda b: b.area)
+                return [replace(largest, index=1)]
+            sorted_boxes = self._sort_reading_order(filtered)
+            return [replace(box, index=i) for i, box in enumerate(sorted_boxes, start=1)]
+
+        # Explicit `standard_sheet` preset: snap single/standard paper sheets on a larger platen
+        # (e.g. A4 placed on an A3 platen) to their physical paper-to-platen step boundaries.
+        if preset == "standard_sheet":
+            self._last_resolved_preset = "standard_sheet"
+            std_boxes = self._build_standard_sheet_candidates(
+                work_bgr,
+                merged_pairs,
+                solid_work_boxes,
+                inv_scale=inv_scale,
+                orig_w=orig_w,
+                orig_h=orig_h,
+                dpi=dpi,
+                unify_single_sheet=True,
+            )
+            candidates = solid_candidates + std_boxes
+            filtered = self._suppress_contained_boxes(candidates)
+            if not filtered:
+                return []
+            if not self.config.multi_document:
+                largest = max(filtered, key=lambda b: b.area)
+                return [replace(largest, index=1)]
+            sorted_boxes = self._sort_reading_order(filtered)
+            return [replace(box, index=i) for i, box in enumerate(sorted_boxes, start=1)]
+
+        # `auto` preset:
+        # 1) Evaluate full-page paper fallback using unpadded boxes so inner printed boundaries
+        #    (table borders / text edges) are inspected directly before outer margin padding.
         raw_filtered = self._suppress_contained_boxes(solid_candidates + merged_printed_raw)
         if (
             raw_filtered
             and self.config.full_page_paper_fallback
             and self._is_printed_content_on_full_page(work_bgr, raw_filtered, scale)
         ):
+            self._last_resolved_preset = "full_page"
             return [
                 RotatedCropBox(
                     center_x=orig_w * 0.5,
@@ -924,10 +1012,36 @@ class MultiDocumentDetector:
                 )
             ]
 
+        # 2) Check whether the scan is a single standard paper sheet (e.g. A4/B5) placed on a
+        #    larger white platen (e.g. A3) with clear paper-to-platen step boundaries.
+        if (
+            is_light_platen
+            and not solid_candidates
+            and len(merged_pairs) == 1
+            and self._should_auto_select_standard_sheet(work_bgr, merged_pairs[0][0])
+        ):
+            self._last_resolved_preset = "standard_sheet"
+            std_boxes = self._build_standard_sheet_candidates(
+                work_bgr,
+                merged_pairs,
+                solid_work_boxes,
+                inv_scale=inv_scale,
+                orig_w=orig_w,
+                orig_h=orig_h,
+                dpi=dpi,
+                unify_single_sheet=False,
+            )
+            filtered = self._suppress_contained_boxes(std_boxes)
+            if filtered:
+                return [replace(box, index=i) for i, box in enumerate(filtered, start=1)]
+
+        # 3) Otherwise use the receipt & multi-document detection result.
+        self._last_resolved_preset = "receipt_multi"
         candidates = solid_candidates + merged_printed
         filtered = self._suppress_contained_boxes(candidates)
         if not filtered:
             if self.config.full_page_paper_fallback and self._has_full_page_printed_ink(work_bgr):
+                self._last_resolved_preset = "full_page"
                 return [
                     RotatedCropBox(
                         center_x=orig_w * 0.5,
@@ -1185,9 +1299,17 @@ class MultiDocumentDetector:
             return True
 
         # Also treat compact neutral dark-ink elements (inverted promo banners, solid logos,
-        # QR blocks) as printed fragments so they merge back into their surrounding white receipt.
+        # QR blocks) or large neutral light-gray shaded tables bordered by dark rules as
+        # printed fragments on a white sheet.
         box_area_ratio = box.area / float(h * w)
-        return paper_l < 140.0 and paper_chroma <= 18.0 and box_area_ratio < 0.04
+        if paper_l < 140.0 and paper_chroma <= 18.0 and box_area_ratio < 0.04:
+            return True
+        return (
+            paper_l >= 180.0
+            and paper_chroma <= 14.0
+            and ink_ratio >= 0.08
+            and box_area_ratio >= 0.08
+        )
 
     def _merge_same_sheet_printed_fragments(
         self,
@@ -1771,6 +1893,279 @@ class MultiDocumentDetector:
             source_height=h,
         )
 
+    @staticmethod
+    def _find_paper_to_platen_step(profile: np.ndarray) -> float | None:
+        """Detect distance from a printed boundary outward to the physical paper-to-platen step.
+
+        Works for single/standard white sheets (e.g. A4 placed on an A3 white platen cover)
+        where the sheet's blank white margin (~248-252.8 luminance) transitions to a flat,
+        saturated white platen cover (~253.5-255.0 with near-zero variance), either with or
+        without a dark paper-edge shadow valley.
+        """
+        n = int(profile.size)
+        if n < 18:
+            return None
+
+        # Outer platen reference: inspect the outer 55% of the valid profile.
+        outer_start = max(10, int(n * 0.45))
+        outer_tail = profile[outer_start:]
+        if outer_tail.size < 8:
+            return None
+
+        platen_level = float(np.median(outer_tail))
+        q75, q25 = np.percentile(outer_tail, [75, 25])
+        outer_iqr = float(q75 - q25)
+        # Require a genuinely uniform, saturated bright white platen region outside the sheet.
+        if platen_level < 252.5 or outer_iqr > 1.2:
+            return None
+
+        # 1) Check for a distinct paper-edge shadow valley whose outer side opens directly
+        #    onto the uniform saturated platen cover.
+        best_valley_idx: int | None = None
+        best_valley_depth = 0.0
+        for idx in range(4, n - 6):
+            val = float(profile[idx])
+            in_med = float(np.median(profile[max(1, idx - 8) : idx - 1]))
+            out_med = float(np.median(profile[idx + 2 : min(n, idx + 12)]))
+            if (
+                abs(out_med - platen_level) <= 0.85
+                and (out_med - val) >= 4.0
+                and (in_med - val) >= 2.5
+            ):
+                depth = min(out_med - val, in_med - val)
+                if depth > best_valley_depth:
+                    best_valley_depth = depth
+                    best_valley_idx = idx
+        if best_valley_idx is not None:
+            return float(best_valley_idx)
+
+        # 2) Otherwise detect a clean brightness step from the inner paper margin up to
+        #    the flat saturated platen level.
+        inner_end = min(16, max(6, n // 2))
+        inner_paper_slice = profile[2:inner_end]
+        if inner_paper_slice.size < 4:
+            return None
+        paper_level = float(np.median(inner_paper_slice))
+        step_height = platen_level - paper_level
+        if step_height < 1.2:
+            return None
+
+        thresh = paper_level + step_height * 0.65
+        for idx in range(4, n - 6):
+            window_out = profile[idx + 1 : min(n, idx + 10)]
+            if (
+                window_out.size >= 5
+                and float(np.median(window_out)) >= thresh
+                and float(np.min(window_out)) >= (platen_level - 0.85)
+            ):
+                return float(idx)
+        return None
+
+    @classmethod
+    def _detect_standard_sheet_edge_offsets(
+        cls,
+        work_gray: np.ndarray,
+        box: RotatedCropBox,
+        *,
+        solid_boxes: Sequence[RotatedCropBox] = (),
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        """Return `(off_top, off_right, off_bottom, off_left)` to paper-to-platen boundaries."""
+        h, w = work_gray.shape[:2]
+        if box.width < 16.0 or box.height < 16.0:
+            return None, None, None, None
+
+        pad_normal = max(120, int(round(max(h, w) * 0.30)))
+        patch_w = int(round(box.width)) + pad_normal * 2
+        patch_h = int(round(box.height)) + pad_normal * 2
+
+        rot_mat = cv2.getRotationMatrix2D((box.center_x, box.center_y), box.angle_deg, 1.0)
+        rot_mat[0, 2] += (patch_w * 0.5) - box.center_x
+        rot_mat[1, 2] += (patch_h * 0.5) - box.center_y
+        inv_mat = cv2.invertAffineTransform(rot_mat)
+
+        bg_fill = int(round(float(np.percentile(work_gray, 95))))
+        patch = cv2.warpAffine(
+            work_gray,
+            rot_mat,
+            (patch_w, patch_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=bg_fill,
+        ).astype(np.float32)
+
+        x1 = int(round(pad_normal))
+        y1 = int(round(pad_normal))
+        x2 = int(round(pad_normal + box.width))
+        y2 = int(round(pad_normal + box.height))
+
+        solid_rects = [b.bounding_rect() for b in solid_boxes]
+        border_inset = 6.0
+        collision_margin = 6.0
+
+        def valid_extent(start_x: float, start_y: float, dx: float, dy: float, max_d: int) -> int:
+            for d in range(1, max_d + 1):
+                lx = start_x + dx * d
+                ly = start_y + dy * d
+                src_x = inv_mat[0, 0] * lx + inv_mat[0, 1] * ly + inv_mat[0, 2]
+                src_y = inv_mat[1, 0] * lx + inv_mat[1, 1] * ly + inv_mat[1, 2]
+                if (
+                    src_x < border_inset
+                    or src_x > (w - 1.0 - border_inset)
+                    or src_y < border_inset
+                    or src_y > (h - 1.0 - border_inset)
+                ):
+                    return d
+                for ox, oy, ow, oh in solid_rects:
+                    if (
+                        (ox - collision_margin) <= src_x <= (ox + ow + collision_margin)
+                        and (oy - collision_margin) <= src_y <= (oy + oh + collision_margin)
+                    ):
+                        return d
+            return max_d
+
+        mid_x = (x1 + x2) * 0.5
+        mid_y = (y1 + y2) * 0.5
+
+        ext_t = valid_extent(mid_x, float(y1), 0.0, -1.0, min(pad_normal, y1))
+        ext_b = valid_extent(mid_x, float(y2), 0.0, 1.0, min(pad_normal, patch_h - 1 - y2))
+        ext_l = valid_extent(float(x1), mid_y, -1.0, 0.0, min(pad_normal, x1))
+        ext_r = valid_extent(float(x2), mid_y, 1.0, 0.0, min(pad_normal, patch_w - 1 - x2))
+
+        t_prof = np.mean(patch[y1 - ext_t : y1 + 1, x1 : x2 + 1], axis=1)[::-1]
+        b_prof = np.mean(patch[y2 : y2 + ext_b + 1, x1 : x2 + 1], axis=1)
+        l_prof = np.mean(patch[y1 : y2 + 1, x1 - ext_l : x1 + 1], axis=0)[::-1]
+        r_prof = np.mean(patch[y1 : y2 + 1, x2 : x2 + ext_r + 1], axis=0)
+
+        off_t = cls._find_paper_to_platen_step(t_prof)
+        off_r = cls._find_paper_to_platen_step(r_prof)
+        off_b = cls._find_paper_to_platen_step(b_prof)
+        off_l = cls._find_paper_to_platen_step(l_prof)
+        return off_t, off_r, off_b, off_l
+
+    def _should_auto_select_standard_sheet(
+        self,
+        work_bgr: np.ndarray,
+        raw_box: RotatedCropBox,
+    ) -> bool:
+        """Return True when `raw_box` is a single standard sheet (e.g. A4) on a larger platen."""
+        h, w = work_bgr.shape[:2]
+        w_ratio = raw_box.width / float(w)
+        h_ratio = raw_box.height / float(h)
+        area_ratio = w_ratio * h_ratio
+        if w_ratio < 0.35 or h_ratio < 0.35 or area_ratio < 0.18:
+            return False
+
+        work_gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
+        offsets = self._detect_standard_sheet_edge_offsets(work_gray, raw_box)
+        detected_sides = sum(1 for off in offsets if off is not None)
+        return detected_sides >= 2
+
+    def _build_standard_sheet_candidates(
+        self,
+        work_bgr: np.ndarray,
+        merged_pairs: list[tuple[RotatedCropBox, RotatedCropBox]],
+        solid_work_boxes: list[RotatedCropBox],
+        *,
+        inv_scale: float,
+        orig_w: int,
+        orig_h: int,
+        dpi: float,
+        unify_single_sheet: bool,
+    ) -> list[RotatedCropBox]:
+        """Expand printed groups to physical paper-to-platen boundaries for standard sheets."""
+        if not merged_pairs:
+            return []
+
+        work_h, work_w = work_bgr.shape[:2]
+        work_gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
+
+        target_pairs = list(merged_pairs)
+        if unify_single_sheet and not solid_work_boxes and len(target_pairs) > 1:
+            # Exclude tiny scanner-border strips before unifying separated blocks on one sheet.
+            valid_pairs = [
+                (rb, eb)
+                for rb, eb in target_pairs
+                if min(rb.width, rb.height) >= 14.0
+            ]
+            if len(valid_pairs) > 1:
+                dom_idx = max(range(len(valid_pairs)), key=lambda k: valid_pairs[k][0].area)
+                dom_angle = valid_pairs[dom_idx][0].angle_deg
+                unified_raw = self._enclose_boxes_at_angle(
+                    [p[0] for p in valid_pairs],
+                    angle_deg=dom_angle,
+                    work_w=work_w,
+                    work_h=work_h,
+                )
+                unified_exp = self._expand_printed_group_to_paper_edges(
+                    work_gray, unified_raw, solid_boxes=solid_work_boxes
+                )
+                target_pairs = [(unified_raw, unified_exp)]
+
+        results: list[RotatedCropBox] = []
+        for raw_wb, fallback_exp_wb in target_pairs:
+            off_t, off_r, off_b, off_l = self._detect_standard_sheet_edge_offsets(
+                work_gray, raw_wb, solid_boxes=solid_work_boxes
+            )
+            if all(off is None for off in (off_t, off_r, off_b, off_l)):
+                chosen_wb = fallback_exp_wb
+            else:
+                # Project fallback_exp_wb into raw_wb's local frame for fallback per-side paddings.
+                rad = math.radians(raw_wb.angle_deg)
+                cos_a = math.cos(rad)
+                sin_a = math.sin(rad)
+                raw_pts = raw_wb.corners()
+                fb_pts = fallback_exp_wb.corners()
+                raw_u = raw_pts[:, 0] * cos_a + raw_pts[:, 1] * sin_a
+                raw_v = -raw_pts[:, 0] * sin_a + raw_pts[:, 1] * cos_a
+                fb_u = fb_pts[:, 0] * cos_a + fb_pts[:, 1] * sin_a
+                fb_v = -fb_pts[:, 0] * sin_a + fb_pts[:, 1] * cos_a
+
+                fb_l = max(0.0, float(np.min(raw_u) - np.min(fb_u)))
+                fb_r = max(0.0, float(np.max(fb_u) - np.max(raw_u)))
+                fb_t = max(0.0, float(np.min(raw_v) - np.min(fb_v)))
+                fb_b = max(0.0, float(np.max(fb_v) - np.max(raw_v)))
+
+                pad_t = off_t if off_t is not None else fb_t
+                pad_r = off_r if off_r is not None else fb_r
+                pad_b = off_b if off_b is not None else fb_b
+                pad_l = off_l if off_l is not None else fb_l
+
+                bx, by, bw, bh = raw_wb.bounding_rect()
+                pad_l = min(pad_l, max(0.0, bx))
+                pad_r = min(pad_r, max(0.0, float(work_w - 1) - (bx + bw)))
+                pad_t = min(pad_t, max(0.0, by))
+                pad_b = min(pad_b, max(0.0, float(work_h - 1) - (by + bh)))
+
+                eff_cx, eff_cy, eff_w, eff_h, eff_angle = raw_wb.with_edge_margins(
+                    top=pad_t, right=pad_r, bottom=pad_b, left=pad_l, unit="px"
+                ).resolved_geometry()
+                chosen_wb = RotatedCropBox(
+                    center_x=eff_cx,
+                    center_y=eff_cy,
+                    width=min(float(work_w), eff_w),
+                    height=min(float(work_h), eff_h),
+                    angle_deg=eff_angle,
+                    confidence=raw_wb.confidence,
+                    source_width=work_w,
+                    source_height=work_h,
+                )
+
+            results.append(
+                RotatedCropBox(
+                    center_x=chosen_wb.center_x * inv_scale,
+                    center_y=chosen_wb.center_y * inv_scale,
+                    width=chosen_wb.width * inv_scale,
+                    height=chosen_wb.height * inv_scale,
+                    angle_deg=chosen_wb.angle_deg,
+                    confidence=chosen_wb.confidence,
+                    index=0,
+                    source_width=orig_w,
+                    source_height=orig_h,
+                    source_dpi=float(dpi),
+                )
+            )
+        return results
+
     def _is_printed_content_on_full_page(
         self,
         work_bgr: np.ndarray,
@@ -1807,6 +2202,23 @@ class MultiDocumentDetector:
         union_h_ratio = (uy2 - uy1) / float(h)
         union_area_ratio = union_w_ratio * union_h_ratio
         if union_w_ratio < 0.50 or union_h_ratio < 0.50 or union_area_ratio < 0.30:
+            return False
+
+        # If a smaller standard sheet (such as an A4 document placed on an A3 platen) has a
+        # distinct paper-to-platen brightness step or paper-edge shadow on 2 or more sides
+        # inside a saturated white platen border, it is NOT a full-page scan.
+        work_gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
+        union_work_box = RotatedCropBox(
+            center_x=(ux1 + ux2) * 0.5,
+            center_y=(uy1 + uy2) * 0.5,
+            width=max(1.0, ux2 - ux1),
+            height=max(1.0, uy2 - uy1),
+            angle_deg=boxes[0].angle_deg if len(boxes) == 1 else 0.0,
+            source_width=w,
+            source_height=h,
+        )
+        step_offsets = self._detect_standard_sheet_edge_offsets(work_gray, union_work_box)
+        if sum(1 for off in step_offsets if off is not None) >= 2:
             return False
 
         rim_px = max(4, min(12, int(round(min(h, w) * 0.01))))

@@ -78,6 +78,8 @@ def test_qml_engine_loads_main_window_and_components() -> None:
     assert root.findChild(QObject, "autoCropCheckBox") is not None
     assert root.findChild(QObject, "multiDocumentCheckBox") is not None
     assert root.findChild(QObject, "autoOrientationCheckBox") is not None
+    assert root.findChild(QObject, "detectionPresetComboBox") is not None
+    assert root.findChild(QObject, "resolvedPresetLabel") is not None
     assert root.findChild(QObject, "cropMarginSlider") is not None
     assert root.findChild(QObject, "fineAngleSlider") is not None
     assert root.findChild(QObject, "rotateLeftButton") is not None
@@ -634,3 +636,73 @@ def test_viewmodel_auto_90_rotation_reflects_in_saved_jpeg_and_syncs_preview_sta
     assert out2.is_file()
     with Image.open(out2) as img2:
         assert img2.height > img2.width
+
+
+def test_viewmodel_detection_preset_selection_and_a4_on_a3_auto_resolution() -> None:
+    """ViewModel auto-selects `standard_sheet` for A4-on-A3 and allows manual preset switching."""
+    import cv2
+    import numpy as np
+
+    from open_escl_client.imaging.multi_crop import encode_image_bytes
+
+    _ensure_qapp()
+
+    # Build A4 sheet (511x726) placed on an A3 white platen (717x1024).
+    w, h = 717, 1024
+    canvas = np.full((h, w, 3), (254, 254, 254), dtype=np.uint8)
+    cv2.rectangle(canvas, (81, 83), (592, 809), (251, 251, 251), thickness=-1)
+    cv2.line(canvas, (81, 83), (592, 83), (238, 238, 238), thickness=2)
+    cv2.rectangle(canvas, (130, 121), (540, 138), (30, 30, 30), thickness=-1)
+    cv2.rectangle(canvas, (98, 150), (576, 752), (232, 232, 232), thickness=-1)
+    cv2.rectangle(canvas, (98, 150), (576, 752), (35, 35, 35), thickness=2)
+    for row_y in range(195, 740, 42):
+        cv2.line(canvas, (98, row_y), (576, row_y), (50, 50, 50), thickness=1)
+
+    scan_png = encode_image_bytes(canvas, fmt="PNG")
+    brother_caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=brother_caps)
+    mock_scan_client = MagicMock()
+    mock_scan_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=scan_png,
+        content_type="image/png",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_scan_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+
+    assert len(vm.detectionPresets) == 4
+    assert vm.detectionPresetCode == "auto"
+    assert vm.selectedDetectionPreset == "自動判別 (推奨)"
+
+    vm.requestPreview()
+    assert vm.cropCount == 1
+    assert vm.resolvedDetectionPreset == "standard_sheet"
+    assert "自動採用: 単票・定型紙" in vm.resolvedDetectionPresetLabel
+    box_auto = vm.cropBoxes[0]
+    assert 500 <= box_auto["widthPx"] <= 522
+    assert 716 <= box_auto["heightPx"] <= 736
+
+    # User switches to "スキャン範囲全面" in UI -> immediately recalculates to full A3 bounds.
+    vm.selectedDetectionPreset = "スキャン範囲全面"
+    assert vm.detectionPresetCode == "full_page"
+    assert vm.resolvedDetectionPreset == "full_page"
+    assert "手動指定: スキャン範囲全面" in vm.resolvedDetectionPresetLabel
+    box_full = vm.cropBoxes[0]
+    assert box_full["widthPx"] == w
+    assert box_full["heightPx"] == h
+
+    # User switches back to "単票・定型紙 (A3内のA4等)" -> crops to A4 sheet again.
+    vm.selectedDetectionPreset = "単票・定型紙 (A3内のA4等)"
+    assert vm.detectionPresetCode == "standard_sheet"
+    assert vm.resolvedDetectionPreset == "standard_sheet"
+    assert "手動指定: 単票・定型紙" in vm.resolvedDetectionPresetLabel
+    box_std = vm.cropBoxes[0]
+    assert 500 <= box_std["widthPx"] <= 522
+    assert 716 <= box_std["heightPx"] <= 736
+

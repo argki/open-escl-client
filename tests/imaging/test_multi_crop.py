@@ -628,3 +628,69 @@ def test_absorbed_top_shadow_line_snaps_tightly_without_overshoot() -> None:
     assert 346.0 <= by <= 354.0
     assert (by + bh) <= 536.0
 
+
+def test_a4_sheet_on_a3_white_platen_crops_to_a4_bounds_and_auto_selects_standard_sheet() -> None:
+    """An A4 white sheet scanned under A3 platen settings crops to the A4 sheet, not full A3."""
+    w, h = 717, 1024  # 100 DPI A3 platen
+    canvas = np.full((h, w, 3), (254, 254, 254), dtype=np.uint8)
+
+    # Physical A4 sheet placed at x=[81..592] (w=511), y=[83..809] (h=726) with slightly
+    # off-white paper luminance (~251) and a faint top paper-edge shadow line at y=83.
+    a4_x1, a4_y1, a4_x2, a4_y2 = 81, 83, 592, 809
+    cv2.rectangle(canvas, (a4_x1, a4_y1), (a4_x2, a4_y2), (251, 251, 251), thickness=-1)
+    cv2.line(canvas, (a4_x1, a4_y1), (a4_x2, a4_y1), (238, 238, 238), thickness=2)
+
+    # Printed heading (y=121..138) + bordered shaded table (x=98..576, y=150..752) inside A4.
+    cv2.rectangle(canvas, (130, 121), (540, 138), (30, 30, 30), thickness=-1)
+    cv2.rectangle(canvas, (98, 150), (576, 752), (232, 232, 232), thickness=-1)
+    cv2.rectangle(canvas, (98, 150), (576, 752), (35, 35, 35), thickness=2)
+    for row_y in range(195, 740, 42):
+        cv2.line(canvas, (98, row_y), (576, row_y), (50, 50, 50), thickness=1)
+
+    # 1) Default `auto` preset must NOT expand to full A3 (717x1024); it must auto-select
+    #    `standard_sheet` and crop to the A4 physical boundaries (~511x726).
+    auto_detector = MultiDocumentDetector()
+    auto_boxes = auto_detector.detect(canvas, dpi=100.0)
+    assert auto_detector.last_resolved_preset == "standard_sheet"
+    assert len(auto_boxes) == 1
+    bx, by, bw, bh = auto_boxes[0].bounding_rect()
+    assert abs(bx - a4_x1) <= 6.0
+    assert abs(by - a4_y1) <= 6.0
+    assert abs(bw - (a4_x2 - a4_x1)) <= 10.0
+    assert abs(bh - (a4_y2 - a4_y1)) <= 10.0
+
+    # 2) Explicit `standard_sheet` preset produces the same A4 physical bounds.
+    std_detector = MultiDocumentDetector(DetectionConfig(detection_preset="standard_sheet"))
+    std_boxes = std_detector.detect(canvas, dpi=100.0)
+    assert std_detector.last_resolved_preset == "standard_sheet"
+    assert len(std_boxes) == 1
+    assert abs(std_boxes[0].width - auto_boxes[0].width) <= 2.0
+    assert abs(std_boxes[0].height - auto_boxes[0].height) <= 2.0
+
+    # 3) Explicit `full_page` preset returns the full A3 scan frame when requested by user.
+    full_detector = MultiDocumentDetector(DetectionConfig(detection_preset="full_page"))
+    full_boxes = full_detector.detect(canvas, dpi=100.0)
+    assert full_detector.last_resolved_preset == "full_page"
+    assert len(full_boxes) == 1
+    assert full_boxes[0].width == pytest.approx(float(w), abs=1.0)
+    assert full_boxes[0].height == pytest.approx(float(h), abs=1.0)
+
+
+def test_auto_preset_preserves_exact_receipt_multi_boxes() -> None:
+    """`auto` preset selects `receipt_multi` on multi-receipt scans with zero difference."""
+    canvas = np.full((720, 1024, 3), (254, 254, 254), dtype=np.uint8)
+    _draw_thermal_receipt(canvas, x0=200, y0=130, width=155, height=460)
+    _draw_thermal_receipt(canvas, x0=560, y0=150, width=160, height=440)
+
+    auto_det = MultiDocumentDetector(DetectionConfig(detection_preset="auto"))
+    receipt_det = MultiDocumentDetector(DetectionConfig(detection_preset="receipt_multi"))
+
+    auto_boxes = auto_det.detect(canvas, dpi=100.0)
+    receipt_boxes = receipt_det.detect(canvas, dpi=100.0)
+
+    assert auto_det.last_resolved_preset == "receipt_multi"
+    assert receipt_det.last_resolved_preset == "receipt_multi"
+    assert len(auto_boxes) == 2
+    assert auto_boxes == receipt_boxes
+
+
