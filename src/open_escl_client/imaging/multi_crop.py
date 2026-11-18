@@ -1631,7 +1631,7 @@ class MultiDocumentDetector:
             baseline = float(np.percentile(profile, 85))
             is_bordered_card = box.confidence >= 0.90
 
-            # 1a) For high-rectangularity bordered cards (e.g. postcards with printed frames
+            # 1a) For high-rectangularity bordered cards (e.g. postcards with printed frames/patterns
             #     extending to all 4 edges), check `profile[2:7]` for clean outer platen and snap
             #     1px inside the absorbed perimeter shadow or directly onto the outer border edge.
             if is_bordered_card and inner_profile.size >= 8:
