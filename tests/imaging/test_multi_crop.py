@@ -694,3 +694,44 @@ def test_auto_preset_preserves_exact_receipt_multi_boxes() -> None:
     assert auto_boxes == receipt_boxes
 
 
+def test_bordered_postcard_and_text_postcard_crop_tightly_without_platen_halo() -> None:
+    """Two tilted postcards on a white platen do not trigger full-page or leave outer halo."""
+    w, h = 717, 1024
+    canvas = np.full((h, w, 3), (254, 254, 254), dtype=np.uint8)
+
+    # 1) Upper postcard (340x252) with outer shadow line, narrow 2px white rim, and blue frame.
+    card1_w, card1_h = 340, 252
+    card1 = np.full((card1_h, card1_w, 3), (252, 252, 252), dtype=np.uint8)
+    # 1px paper-edge shadow around perimeter, 2px white rim, then dense colored border frame.
+    cv2.rectangle(card1, (0, 0), (card1_w - 1, card1_h - 1), (232, 232, 232), thickness=1)
+    cv2.rectangle(card1, (3, 3), (card1_w - 4, card1_h - 4), (195, 165, 120), thickness=14)
+    cv2.rectangle(card1, (18, 18), (card1_w - 19, 48), (45, 40, 185), thickness=-1)
+    for y in range(70, card1_h - 25, 22):
+        cv2.rectangle(card1, (26, y), (card1_w - 26, y + 8), (60, 50, 40), thickness=-1)
+    _paste_rotated_document(canvas, card1, center=(382.0, 280.0), angle_deg=12.75, shadow_delta=0)
+
+    # 2) Lower white text postcard (350x230) tilted at -5.2 deg.
+    card2_w, card2_h = 350, 230
+    card2 = np.full((card2_h, card2_w, 3), (254, 254, 254), dtype=np.uint8)
+    cv2.line(card2, (0, 0), (card2_w - 1, 0), (220, 220, 220), thickness=2)
+    for y in range(28, card2_h - 20, 20):
+        cv2.rectangle(card2, (24, y), (card2_w - 24, y + 7), (40, 40, 40), thickness=-1)
+    _paste_rotated_document(canvas, card2, center=(358.0, 726.0), angle_deg=-5.2, shadow_delta=0)
+
+    detector = MultiDocumentDetector()
+    boxes = detector.detect(canvas, dpi=100.0)
+
+    # Must NOT collapse into 1 full-page box; must detect both postcards individually.
+    assert detector.last_resolved_preset == "receipt_multi"
+    assert len(boxes) == 2
+
+    upper_box = min(boxes, key=lambda b: b.center_y)
+    # Upper bordered postcard must be cropped tightly to its physical frame (~336x248),
+    # without adding +18px of outer white platen margin.
+    assert upper_box.width <= card1_w + 2.0
+    assert upper_box.height <= card1_h + 2.0
+    assert upper_box.width >= card1_w - 10.0
+    assert upper_box.height >= card1_h - 10.0
+
+
+

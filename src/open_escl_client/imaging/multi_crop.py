@@ -826,7 +826,8 @@ class MultiDocumentDetector:
 
         solid_candidates: list[RotatedCropBox] = []
         printed_fragments: list[tuple[RotatedCropBox, np.ndarray]] = []
-        frag_min_area_ratio = min(self.config.min_area_ratio, 0.0004)
+        frag_min_area_ratio = min(self.config.min_area_ratio, 0.00008)
+        border_guard = max(4.0, min(10.0, min(work_w, work_h) * 0.006))
 
         for contour in contours:
             contour_area = float(cv2.contourArea(contour))
@@ -849,12 +850,17 @@ class MultiDocumentDetector:
                 and min(rw, rh) >= min_side_work
                 and rectangularity >= self.config.min_rectangularity
             )
+            inside_border_guard = (
+                border_guard <= cx <= (work_w - border_guard)
+                and border_guard <= cy <= (work_h - border_guard)
+            )
             is_small_fragment = (
                 is_light_platen
                 and self.config.merge_same_sheet_fragments
+                and inside_border_guard
                 and area_ratio >= frag_min_area_ratio
-                and min(rw, rh) >= 7.0
-                and max(rw, rh) >= 16.0
+                and min(rw, rh) >= 5.0
+                and max(rw, rh) >= 9.0
                 and rectangularity >= 0.25
             )
             if not is_regular and not is_small_fragment:
@@ -1367,13 +1373,15 @@ class MultiDocumentDetector:
                 min_w = max(1.0, min(aw, bw))
                 max_w = max(aw, bw)
                 max_gap_y = max(24.0, min(max_w * 0.72, max_dim * 0.085))
-                same_column = ov_x >= min_w * 0.25 and gap_y <= max_gap_y
+                min_ov_x = -min_w * 0.6 if (min_w <= 16.0 and gap_y <= 28.0) else min_w * 0.25
+                same_column = ov_x >= min_ov_x and gap_y <= max_gap_y
 
                 # Horizontal stacking (sideways 90°/270° receipt parts aligned along Y).
                 min_h = max(1.0, min(ah, bh))
                 max_h = max(ah, bh)
                 max_gap_x = max(24.0, min(max_h * 0.72, max_dim * 0.085))
-                same_row = ov_y >= min_h * 0.25 and gap_x <= max_gap_x
+                min_ov_y = -min_h * 0.6 if (min_h <= 16.0 and gap_x <= 28.0) else min_h * 0.25
+                same_row = ov_y >= min_ov_y and gap_x <= max_gap_x
 
                 if not (same_column or same_row):
                     continue
@@ -1398,6 +1406,12 @@ class MultiDocumentDetector:
             if rw <= 0.0 or rh <= 0.0:
                 continue
 
+            if len(member_indices) == 1:
+                group_conf = fragments[member_indices[0]][0].confidence
+            else:
+                total_ca = sum(float(cv2.contourArea(fragments[idx][1])) for idx in member_indices)
+                group_conf = round(min(1.0, total_ca / float(rw * rh)), 4)
+
             raw_groups.append(
                 RotatedCropBox(
                     center_x=cx,
@@ -1405,7 +1419,7 @@ class MultiDocumentDetector:
                     width=rw,
                     height=rh,
                     angle_deg=angle_deg,
-                    confidence=0.85,
+                    confidence=group_conf,
                     source_width=w,
                     source_height=h,
                 )
@@ -1614,11 +1628,49 @@ class MultiDocumentDetector:
         ) -> float | None:
             if profile.size < 6:
                 return None
-            # 1) Check whether a crisp physical paper-edge shadow line was already absorbed
-            #    into the raw foreground contour (sitting right on the boundary or a few pixels
-            #    inside due to morphological closing). In that case, snap directly to that line
-            #    (0 or small negative offset) instead of pushing further out with `default_pad`.
             baseline = float(np.percentile(profile, 85))
+            is_bordered_card = box.confidence >= 0.90
+
+            # 1a) For high-rectangularity bordered cards (e.g. postcards with printed frames
+            #     extending to all 4 edges), check `profile[2:7]` for clean outer platen and snap
+            #     1px inside the absorbed perimeter shadow or directly onto the outer border edge.
+            if is_bordered_card and inner_profile.size >= 8:
+                card_outer = (
+                    profile[2 : min(7, profile.size)]
+                    if profile.size >= 4
+                    else profile[: min(5, profile.size)]
+                )
+                if float(np.min(card_outer)) >= (baseline - 3.5):
+                    for k in range(0, min(6, inner_profile.size - 4)):
+                        val_k = float(inner_profile[k])
+                        if (
+                            k > 0
+                            and float(inner_profile[k - 1]) < (baseline - 4.0)
+                            and val_k > float(inner_profile[k - 1]) + 1.5
+                        ):
+                            break
+                        if (baseline - val_k) < 4.0:
+                            continue
+                        if k + 1 < inner_profile.size and float(inner_profile[k + 1]) < val_k - 0.5:
+                            continue
+                        behind = inner_profile[k + 1 : min(inner_profile.size, k + 7)]
+                        if behind.size >= 1:
+                            behind_peak = float(np.max(behind))
+                            if (
+                                (behind_peak >= (baseline - 5.0) and (behind_peak - val_k) >= 3.0)
+                                or (
+                                    behind_peak >= (baseline - 12.0)
+                                    and (behind_peak - val_k) >= 8.0
+                                )
+                            ):
+                                return -float(k + 1)
+                    if (
+                        (baseline - float(inner_profile[0])) <= 12.0
+                        and (baseline - float(np.min(inner_profile[2:7]))) >= 20.0
+                    ):
+                        return -2.0
+
+            # 1b) Standard absorbed paper-edge shadow check for receipts and white slips.
             if inner_profile.size >= 8:
                 outer_clean = float(np.min(profile[: min(5, profile.size)])) >= (baseline - 3.5)
                 if outer_clean:
@@ -1850,27 +1902,43 @@ class MultiDocumentDetector:
         if off_t is not None:
             edge_y_top = float(y1) - off_t
             if has_horizontal_shadow_support(edge_y_top):
-                pad_l = max(pad_l, trace_horizontal_edge(edge_y_top, x1, -1, outward_dy=-1))
-                pad_r = max(pad_r, trace_horizontal_edge(edge_y_top, x2, 1, outward_dy=-1))
+                traced_l = trace_horizontal_edge(edge_y_top, x1, -1, outward_dy=-1)
+                traced_r = trace_horizontal_edge(edge_y_top, x2, 1, outward_dy=-1)
+                if traced_l > 3.0:
+                    pad_l = max(pad_l, traced_l)
+                if traced_r > 3.0:
+                    pad_r = max(pad_r, traced_r)
         if off_b is not None:
             edge_y_bot = float(y2) + off_b
             if has_horizontal_shadow_support(edge_y_bot):
-                pad_l = max(pad_l, trace_horizontal_edge(edge_y_bot, x1, -1, outward_dy=1))
-                pad_r = max(pad_r, trace_horizontal_edge(edge_y_bot, x2, 1, outward_dy=1))
+                traced_l = trace_horizontal_edge(edge_y_bot, x1, -1, outward_dy=1)
+                traced_r = trace_horizontal_edge(edge_y_bot, x2, 1, outward_dy=1)
+                if traced_l > 3.0:
+                    pad_l = max(pad_l, traced_l)
+                if traced_r > 3.0:
+                    pad_r = max(pad_r, traced_r)
         if off_l is not None:
             edge_x_left = float(x1) - off_l
             if has_vertical_shadow_support(edge_x_left):
                 if off_t is None:
-                    pad_t = max(pad_t, trace_vertical_edge(edge_x_left, y1, -1, outward_dx=-1))
+                    traced_t = trace_vertical_edge(edge_x_left, y1, -1, outward_dx=-1)
+                    if traced_t > 3.0:
+                        pad_t = max(pad_t, traced_t)
                 if off_b is None:
-                    pad_b = max(pad_b, trace_vertical_edge(edge_x_left, y2, 1, outward_dx=-1))
+                    traced_b = trace_vertical_edge(edge_x_left, y2, 1, outward_dx=-1)
+                    if traced_b > 3.0:
+                        pad_b = max(pad_b, traced_b)
         if off_r is not None:
             edge_x_right = float(x2) + off_r
             if has_vertical_shadow_support(edge_x_right):
                 if off_t is None:
-                    pad_t = max(pad_t, trace_vertical_edge(edge_x_right, y1, -1, outward_dx=1))
+                    traced_t = trace_vertical_edge(edge_x_right, y1, -1, outward_dx=1)
+                    if traced_t > 3.0:
+                        pad_t = max(pad_t, traced_t)
                 if off_b is None:
-                    pad_b = max(pad_b, trace_vertical_edge(edge_x_right, y2, 1, outward_dx=1))
+                    traced_b = trace_vertical_edge(edge_x_right, y2, 1, outward_dx=1)
+                    if traced_b > 3.0:
+                        pad_b = max(pad_b, traced_b)
 
         # Clamp final paddings to stay strictly within source image boundaries.
         bx, by, bw, bh = box.bounding_rect()
@@ -2193,6 +2261,14 @@ class MultiDocumentDetector:
 
         # Require the union of detected printed boxes to span a substantial portion of the scan
         # frame so a single small white receipt on a larger A3/A4 platen is NOT expanded to full.
+        # Also reject full-page fallback when detected boxes are tilted or mutually misaligned
+        # (e.g. two skewed postcards placed separately on an A3 platen).
+        if any(abs(b.angle_deg) > 4.5 for b in boxes):
+            return False
+        total_box_area_ratio = sum(b.area * (float(scale) ** 2) for b in boxes) / float(h * w)
+        if total_box_area_ratio < 0.24:
+            return False
+
         all_corners = np.vstack([b.corners() * float(scale) for b in boxes])
         ux1 = float(np.min(all_corners[:, 0]))
         uy1 = float(np.min(all_corners[:, 1]))
