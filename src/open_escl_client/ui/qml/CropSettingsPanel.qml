@@ -59,23 +59,12 @@ GroupBox {
             spacing: 4
             enabled: viewModel ? viewModel.autoCropEnabled : true
 
-            RowLayout {
+            Label {
+                text: "検出パターン（原稿タイプ）"
+                font.bold: true
+                color: "#374151"
                 Layout.fillWidth: true
-                Label {
-                    text: "検出パターン（原稿タイプ）"
-                    font.bold: true
-                    color: "#374151"
-                }
-                Item { Layout.fillWidth: true }
-                Label {
-                    id: resolvedPresetLabel
-                    objectName: "resolvedPresetLabel"
-                    visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled) : false
-                    text: viewModel ? viewModel.resolvedDetectionPresetLabel : ""
-                    font.pixelSize: 11
-                    font.bold: true
-                    color: "#1D4ED8"
-                }
+                elide: Text.ElideRight
             }
 
             ComboBox {
@@ -93,6 +82,18 @@ GroupBox {
                         viewModel.selectedDetectionPreset = model[index]
                     }
                 }
+            }
+
+            Label {
+                id: resolvedPresetLabel
+                objectName: "resolvedPresetLabel"
+                visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled) : false
+                text: viewModel ? viewModel.resolvedDetectionPresetLabel : ""
+                font.pixelSize: 11
+                font.bold: true
+                color: "#1D4ED8"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
             }
         }
 

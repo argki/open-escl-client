@@ -688,6 +688,17 @@ def test_viewmodel_detection_preset_selection_and_a4_on_a3_auto_resolution() -> 
     assert 500 <= box_auto["widthPx"] <= 522
     assert 716 <= box_auto["heightPx"] <= 736
 
+    # Verify QML sidebar layout does not overflow horizontally when long resolved label is active.
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+    crop_panel = root.findChild(QObject, "cropSettingsPanel")
+    save_panel = root.findChild(QObject, "saveSettingsPanel")
+    assert crop_panel is not None and save_panel is not None
+    assert float(crop_panel.property("width")) <= float(save_panel.property("width")) + 1.0
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
     # User switches to "スキャン範囲全面" in UI -> immediately recalculates to full A3 bounds.
     vm.selectedDetectionPreset = "スキャン範囲全面"
     assert vm.detectionPresetCode == "full_page"
