@@ -33,6 +33,21 @@ VALID_DETECTION_PRESETS: tuple[DetectionPreset, ...] = (
 MM_PER_INCH = 25.4
 MIN_CROP_SIDE_PX = 4.0
 
+# Standard physical paper dimensions (short_mm, long_mm, name) used to complete
+# unanchored edges when only 1-2 sides of a document cast crisp scanner shadows.
+STANDARD_PAPER_SPECS_MM: tuple[tuple[float, float, str], ...] = (
+    (100.0, 148.0, "postcard"),
+    (102.0, 152.0, "kg_photo"),
+    (105.0, 148.0, "a6"),
+    (89.0, 127.0, "l_photo"),
+    (127.0, 178.0, "2l_photo"),
+    (128.0, 182.0, "b6"),
+    (148.0, 210.0, "a5"),
+    (182.0, 257.0, "b5"),
+    (210.0, 297.0, "a4"),
+    (55.0, 91.0, "business_card"),
+)
+
 
 def normalize_detection_preset(preset: str) -> DetectionPreset:
     """Normalize a detection preset string into a valid `DetectionPreset` literal."""
@@ -722,6 +737,7 @@ class DetectionConfig:
     paper_color_match_max_delta_e: float = 9.0
     printed_border_ink_drop_l: float = 40.0
     merge_same_sheet_fragments: bool = True
+    aspect_ratio_completion: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,6 +940,8 @@ class MultiDocumentDetector:
                 printed_fragments,
                 solid_work_boxes,
                 min_side_work=min_side_work,
+                dpi=float(dpi),
+                scale=float(scale),
             )
             for raw_wb, exp_wb in merged_pairs:
                 merged_printed_raw.append(
@@ -1324,6 +1342,8 @@ class MultiDocumentDetector:
         solid_boxes: list[RotatedCropBox],
         *,
         min_side_work: float,
+        dpi: float = 0.0,
+        scale: float = 1.0,
     ) -> list[tuple[RotatedCropBox, RotatedCropBox]]:
         """Cluster nearby aligned printed blocks on white sheets into `(raw, expanded)` boxes."""
         n = len(fragments)
@@ -1432,7 +1452,12 @@ class MultiDocumentDetector:
         expanded_groups: list[tuple[RotatedCropBox, RotatedCropBox]] = []
         for raw_group in raw_groups:
             expanded = self._expand_printed_group_to_paper_edges(
-                work_gray, raw_group, solid_boxes=solid_boxes
+                work_gray,
+                raw_group,
+                solid_boxes=solid_boxes,
+                dpi=dpi,
+                scale=scale,
+                aspect_ratio_completion=self.config.aspect_ratio_completion,
             )
             expanded_groups.append((raw_group, expanded))
 
@@ -1554,12 +1579,16 @@ class MultiDocumentDetector:
             source_height=work_h,
         )
 
-    @staticmethod
+    @classmethod
     def _expand_printed_group_to_paper_edges(
+        cls,
         work_gray: np.ndarray,
         box: RotatedCropBox,
         *,
         solid_boxes: Sequence[RotatedCropBox] = (),
+        dpi: float = 0.0,
+        scale: float = 1.0,
+        aspect_ratio_completion: bool = True,
     ) -> RotatedCropBox:
         """Snap a printed-fragment box outward to faint paper edges and trace shadow lines."""
         h, w = work_gray.shape[:2]
@@ -1620,18 +1649,43 @@ class MultiDocumentDetector:
                     return False
             return True
 
+        shadow_drop_thresh = 4.0
+
+        def has_horizontal_shadow_support(edge_y: float) -> bool:
+            yi = int(round(edge_y))
+            if yi < 6 or yi >= patch_h - 6 or x2 <= x1 + 8:
+                return False
+            strip = np.min(patch[yi - 2 : yi + 3, x1 : x2 + 1], axis=0)
+            above = float(np.median(patch[yi - 6 : yi - 3, x1 : x2 + 1]))
+            below = float(np.median(patch[yi + 4 : yi + 7, x1 : x2 + 1]))
+            local_bg = max(above, below)
+            hits = np.count_nonzero((local_bg - strip) >= shadow_drop_thresh)
+            return (float(hits) / float(strip.size)) >= 0.45
+
+        def has_vertical_shadow_support(edge_x: float) -> bool:
+            xi = int(round(edge_x))
+            if xi < 6 or xi >= patch_w - 6 or y2 <= y1 + 8:
+                return False
+            strip = np.min(patch[y1 : y2 + 1, xi - 2 : xi + 3], axis=1)
+            left_med = float(np.median(patch[y1 : y2 + 1, xi - 6 : xi - 3]))
+            right_med = float(np.median(patch[y1 : y2 + 1, xi + 4 : xi + 7]))
+            local_bg = max(left_med, right_med)
+            hits = np.count_nonzero((local_bg - strip) >= shadow_drop_thresh)
+            return (float(hits) / float(strip.size)) >= 0.45
+
         def find_normal_edge(
             profile: np.ndarray,
             *,
             inner_profile: np.ndarray,
             check_valid: Callable[[int], bool],
+            check_inner_line_support: Callable[[int], bool],
         ) -> float | None:
             if profile.size < 6:
                 return None
             baseline = float(np.percentile(profile, 85))
             is_bordered_card = box.confidence >= 0.90
 
-            # 1a) For high-rectangularity bordered cards (e.g. postcards with printed frames/patterns
+            # 1a) For high-rectangularity bordered cards (e.g. postcards with printed frames
             #     extending to all 4 edges), check `profile[2:7]` for clean outer platen and snap
             #     1px inside the absorbed perimeter shadow or directly onto the outer border edge.
             if is_bordered_card and inner_profile.size >= 8:
@@ -1672,19 +1726,38 @@ class MultiDocumentDetector:
 
             # 1b) Standard absorbed paper-edge shadow check for receipts and white slips.
             if inner_profile.size >= 8:
-                outer_clean = float(np.min(profile[: min(5, profile.size)])) >= (baseline - 3.5)
+                inner_outer = (
+                    profile[1 : min(6, profile.size)]
+                    if profile.size >= 3
+                    else profile[: min(5, profile.size)]
+                )
+                outer_clean = float(np.min(inner_outer)) >= (baseline - 3.5)
                 if outer_clean:
                     max_in = min(14, inner_profile.size - 4)
+                    dark_run = 0
                     for k in range(0, max_in):
-                        # Everything between the raw boundary and `k` must be blank white.
-                        if k > 0 and float(np.min(inner_profile[:k])) < (baseline - 4.0):
-                            break
                         val_k = float(inner_profile[k])
+                        # Allow descending a 2-4px wide shadow valley slope, but stop if a dark
+                        # region is too wide (> 4px, i.e. printed text/banner) or starts rising.
+                        if (
+                            k > 0
+                            and float(inner_profile[k - 1]) < (baseline - 4.0)
+                            and val_k > float(inner_profile[k - 1]) + 1.5
+                        ):
+                            break
                         drop_k = baseline - val_k
                         if drop_k < 4.0:
+                            dark_run = 0
+                            continue
+                        dark_run += 1
+                        if dark_run > 4:
+                            break
+                        # Wait until the local minimum of the absorbed shadow valley.
+                        if k + 1 < inner_profile.size and float(inner_profile[k + 1]) < val_k - 0.5:
                             continue
                         # Confirm it is a thin shadow valley with white paper margin behind it
-                        # (not a solid printed banner or dense text).
+                        # (not a solid printed banner or dense text) AND has continuous shadow
+                        # line support along the edge (not isolated sparse bullets like "1, 2, 3").
                         behind = inner_profile[k + 2 : min(inner_profile.size, k + 7)]
                         if behind.size < 2:
                             continue
@@ -1692,6 +1765,7 @@ class MultiDocumentDetector:
                         if (
                             behind_white >= (baseline - 5.0)
                             and (behind_white - val_k) >= 3.0
+                            and check_inner_line_support(k)
                         ):
                             return -float(k)
 
@@ -1756,21 +1830,25 @@ class MultiDocumentDetector:
             l_prof,
             inner_profile=l_in,
             check_valid=lambda d: local_point_valid(float(x1 - d), mid_y),
+            check_inner_line_support=lambda k: has_vertical_shadow_support(float(x1 + k)),
         )
         off_r = find_normal_edge(
             r_prof,
             inner_profile=r_in,
             check_valid=lambda d: local_point_valid(float(x2 + d), mid_y),
+            check_inner_line_support=lambda k: has_vertical_shadow_support(float(x2 - k)),
         )
         off_t = find_normal_edge(
             t_prof,
             inner_profile=t_in,
             check_valid=lambda d: local_point_valid(mid_x, float(y1 - d)),
+            check_inner_line_support=lambda k: has_horizontal_shadow_support(float(y1 + k)),
         )
         off_b = find_normal_edge(
             b_prof,
             inner_profile=b_in,
             check_valid=lambda d: local_point_valid(mid_x, float(y2 + d)),
+            check_inner_line_support=lambda k: has_horizontal_shadow_support(float(y2 - k)),
         )
 
         pad_l = off_l if off_l is not None else default_pad
@@ -1782,29 +1860,6 @@ class MultiDocumentDetector:
         # Verify the detected normal edge is a genuine continuous thin shadow along the current
         # side (>= 45% coverage), then trace it outward to the sheet's physical corners.
         max_gap_px = max(12, int(round(max_dim * 0.016)))
-        shadow_drop_thresh = 4.0
-
-        def has_horizontal_shadow_support(edge_y: float) -> bool:
-            yi = int(round(edge_y))
-            if yi < 6 or yi >= patch_h - 6 or x2 <= x1 + 8:
-                return False
-            strip = np.min(patch[yi - 2 : yi + 3, x1 : x2 + 1], axis=0)
-            above = float(np.median(patch[yi - 6 : yi - 3, x1 : x2 + 1]))
-            below = float(np.median(patch[yi + 4 : yi + 7, x1 : x2 + 1]))
-            local_bg = max(above, below)
-            hits = np.count_nonzero((local_bg - strip) >= shadow_drop_thresh)
-            return (float(hits) / float(strip.size)) >= 0.45
-
-        def has_vertical_shadow_support(edge_x: float) -> bool:
-            xi = int(round(edge_x))
-            if xi < 6 or xi >= patch_w - 6 or y2 <= y1 + 8:
-                return False
-            strip = np.min(patch[y1 : y2 + 1, xi - 2 : xi + 3], axis=1)
-            left_med = float(np.median(patch[y1 : y2 + 1, xi - 6 : xi - 3]))
-            right_med = float(np.median(patch[y1 : y2 + 1, xi + 4 : xi + 7]))
-            local_bg = max(left_med, right_med)
-            hits = np.count_nonzero((local_bg - strip) >= shadow_drop_thresh)
-            return (float(hits) / float(strip.size)) >= 0.45
 
         def trace_horizontal_edge(edge_y: float, start_x: int, step: int, outward_dy: int) -> float:
             """Trace a horizontal shadow line outward from `start_x` in direction `step` (±1)."""
@@ -1899,9 +1954,13 @@ class MultiDocumentDetector:
                         break
             return float(last_hit_dist)
 
+        horiz_supported = False
+        vert_supported = False
+
         if off_t is not None:
             edge_y_top = float(y1) - off_t
             if has_horizontal_shadow_support(edge_y_top):
+                horiz_supported = True
                 traced_l = trace_horizontal_edge(edge_y_top, x1, -1, outward_dy=-1)
                 traced_r = trace_horizontal_edge(edge_y_top, x2, 1, outward_dy=-1)
                 if traced_l > 3.0:
@@ -1911,6 +1970,7 @@ class MultiDocumentDetector:
         if off_b is not None:
             edge_y_bot = float(y2) + off_b
             if has_horizontal_shadow_support(edge_y_bot):
+                horiz_supported = True
                 traced_l = trace_horizontal_edge(edge_y_bot, x1, -1, outward_dy=1)
                 traced_r = trace_horizontal_edge(edge_y_bot, x2, 1, outward_dy=1)
                 if traced_l > 3.0:
@@ -1920,6 +1980,7 @@ class MultiDocumentDetector:
         if off_l is not None:
             edge_x_left = float(x1) - off_l
             if has_vertical_shadow_support(edge_x_left):
+                vert_supported = True
                 if off_t is None:
                     traced_t = trace_vertical_edge(edge_x_left, y1, -1, outward_dx=-1)
                     if traced_t > 3.0:
@@ -1931,6 +1992,7 @@ class MultiDocumentDetector:
         if off_r is not None:
             edge_x_right = float(x2) + off_r
             if has_vertical_shadow_support(edge_x_right):
+                vert_supported = True
                 if off_t is None:
                     traced_t = trace_vertical_edge(edge_x_right, y1, -1, outward_dx=1)
                     if traced_t > 3.0:
@@ -1939,6 +2001,30 @@ class MultiDocumentDetector:
                     traced_b = trace_vertical_edge(edge_x_right, y2, 1, outward_dx=1)
                     if traced_b > 3.0:
                         pad_b = max(pad_b, traced_b)
+
+        # Step 3: Aspect-ratio completion anchored on high-confidence sides.
+        # When a standard white document (e.g. a 100x148mm postcard) casts crisp shadows only on
+        # one or two sides, the unanchored side stops near the edge of the ink. Anchor the
+        # confident axis and extend unanchored edge(s) outward to the matched standard paper ratio.
+        if aspect_ratio_completion:
+            eff_dpi = float(dpi) * float(scale) if dpi > 0.0 and scale > 0.0 else 0.0
+            pad_t, pad_r, pad_b, pad_l = cls._complete_margins_by_standard_ratio(
+                patch=patch,
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                pad_t=pad_t,
+                pad_r=pad_r,
+                pad_b=pad_b,
+                pad_l=pad_l,
+                horiz_supported=horiz_supported,
+                vert_supported=vert_supported,
+                box_confidence=box.confidence,
+                bg_fill=bg_fill,
+                effective_dpi=eff_dpi,
+                local_point_valid=local_point_valid,
+            )
 
         # Clamp final paddings to stay strictly within source image boundaries.
         bx, by, bw, bh = box.bounding_rect()
@@ -1960,6 +2046,242 @@ class MultiDocumentDetector:
             source_width=w,
             source_height=h,
         )
+
+    @staticmethod
+    def _measure_patch_edge_coverage(
+        patch: np.ndarray,
+        lx1: int,
+        ly1: int,
+        lx2: int,
+        ly2: int,
+    ) -> tuple[float, float, float, float]:
+        """Measure perimeter shadow/step support ratios `(top, right, bottom, left)`."""
+        ph, pw = patch.shape[:2]
+        lx1 = max(0, min(pw - 2, lx1))
+        lx2 = max(lx1 + 1, min(pw - 1, lx2))
+        ly1 = max(0, min(ph - 2, ly1))
+        ly2 = max(ly1 + 1, min(ph - 1, ly2))
+
+        edges = (
+            (
+                0,
+                patch[max(0, ly1 - 2) : min(ph, ly1 + 3), lx1 : lx2 + 1],
+                patch[max(0, ly1 - 7) : max(1, ly1 - 2), lx1 : lx2 + 1],
+                patch[min(ph - 1, ly1 + 3) : min(ph, ly1 + 8), lx1 : lx2 + 1],
+            ),
+            (
+                1,
+                patch[ly1 : ly2 + 1, max(0, lx2 - 2) : min(pw, lx2 + 3)],
+                patch[ly1 : ly2 + 1, min(pw - 1, lx2 + 3) : min(pw, lx2 + 8)],
+                patch[ly1 : ly2 + 1, max(0, lx2 - 7) : max(1, lx2 - 2)],
+            ),
+            (
+                0,
+                patch[max(0, ly2 - 2) : min(ph, ly2 + 3), lx1 : lx2 + 1],
+                patch[min(ph - 1, ly2 + 3) : min(ph, ly2 + 8), lx1 : lx2 + 1],
+                patch[max(0, ly2 - 7) : max(1, ly2 - 2), lx1 : lx2 + 1],
+            ),
+            (
+                1,
+                patch[ly1 : ly2 + 1, max(0, lx1 - 2) : min(pw, lx1 + 3)],
+                patch[ly1 : ly2 + 1, max(0, lx1 - 7) : max(1, lx1 - 2)],
+                patch[ly1 : ly2 + 1, min(pw - 1, lx1 + 3) : min(pw, lx1 + 8)],
+            ),
+        )
+        covs: list[float] = []
+        for axis, band, out_band, in_band in edges:
+            if band.size == 0:
+                covs.append(0.0)
+                continue
+            out_med = float(np.median(out_band)) if out_band.size else 254.0
+            in_med = float(np.median(in_band)) if in_band.size else 254.0
+            bg = max(out_med, in_med)
+            strip_min = np.min(band, axis=axis)
+            cov = float(np.count_nonzero((bg - strip_min) >= 4.0)) / float(max(1, strip_min.size))
+            covs.append(cov)
+        return covs[0], covs[1], covs[2], covs[3]
+
+    @staticmethod
+    def _pick_standard_target_aspect_ratio(
+        anchor_px: float,
+        other_px: float,
+        *,
+        anchor_is_long: bool,
+        effective_dpi: float,
+    ) -> float | None:
+        """Select a target `long / short` aspect ratio when `other_px` appears under-detected."""
+        if anchor_px <= 0.0 or other_px <= 0.0:
+            return None
+        cur_ratio = (anchor_px / other_px) if anchor_is_long else (other_px / anchor_px)
+        # Do not force elongated receipts/slips (ratio > 1.92) or near-square items (< 1.10).
+        if cur_ratio > 1.92 or cur_ratio < 1.10:
+            return None
+
+        if effective_dpi > 0.0:
+            anchor_mm = anchor_px * MM_PER_INCH / effective_dpi
+            other_mm = other_px * MM_PER_INCH / effective_dpi
+            best_ratio: float | None = None
+            best_err = 999.0
+            for short_mm, long_mm, _ in STANDARD_PAPER_SPECS_MM:
+                ref_anchor = long_mm if anchor_is_long else short_mm
+                ref_other = short_mm if anchor_is_long else long_mm
+                rel_err = abs(anchor_mm - ref_anchor) / ref_anchor
+                if (
+                    rel_err <= 0.065
+                    and ref_other * 0.72 <= other_mm <= ref_other * 0.985
+                    and rel_err < best_err
+                ):
+                    best_err = rel_err
+                    best_ratio = long_mm / short_mm
+            if best_ratio is not None:
+                return best_ratio
+
+        # Resolution-independent fallback for standard postcard/document proportions.
+        if anchor_is_long and 1.50 <= cur_ratio <= 1.88:
+            return 1.480
+        if (not anchor_is_long) and 1.15 <= cur_ratio <= 1.39:
+            return 1.480
+        return None
+
+    @classmethod
+    def _complete_margins_by_standard_ratio(
+        cls,
+        *,
+        patch: np.ndarray,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        pad_t: float,
+        pad_r: float,
+        pad_b: float,
+        pad_l: float,
+        horiz_supported: bool,
+        vert_supported: bool,
+        box_confidence: float,
+        bg_fill: int,
+        effective_dpi: float,
+        local_point_valid: Callable[[float, float], bool],
+    ) -> tuple[float, float, float, float]:
+        """Extend unanchored edge(s) outward to match standard paper proportions."""
+        lx1 = int(round(x1 - pad_l))
+        lx2 = int(round(x2 + pad_r))
+        ly1 = int(round(y1 - pad_t))
+        ly2 = int(round(y2 + pad_b))
+        cur_w = float(lx2 - lx1)
+        cur_h = float(ly2 - ly1)
+        if cur_w < 16.0 or cur_h < 16.0:
+            return pad_t, pad_r, pad_b, pad_l
+
+        cov_t, cov_r, cov_b, cov_l = cls._measure_patch_edge_coverage(patch, lx1, ly1, lx2, ly2)
+
+        # Skip when all 4 edges (or 3+ edges of a high-rectangularity bordered card) are solid.
+        if min(cov_t, cov_b) >= 0.45 and min(cov_l, cov_r) >= 0.45:
+            return pad_t, pad_r, pad_b, pad_l
+        if (
+            box_confidence >= 0.90
+            and sum(1 for c in (cov_t, cov_r, cov_b, cov_l) if c >= 0.65) >= 3
+        ):
+            return pad_t, pad_r, pad_b, pad_l
+
+        w_anchored = (cov_l >= 0.45 and cov_r >= 0.45) or (
+            max(cov_t, cov_b) >= 0.65 and horiz_supported
+        )
+        h_anchored = (cov_t >= 0.45 and cov_b >= 0.45) or (
+            max(cov_l, cov_r) >= 0.65 and vert_supported
+        )
+
+        # Decide which axis acts as anchor and which axis needs unanchored edge completion.
+        expand_vertical: bool | None = None
+        if w_anchored and min(cov_t, cov_b) < 0.35:
+            if not h_anchored or cur_w >= cur_h:
+                expand_vertical = True
+        if expand_vertical is None and h_anchored and min(cov_l, cov_r) < 0.35:
+            if not w_anchored or cur_h > cur_w:
+                expand_vertical = False
+        if expand_vertical is None:
+            return pad_t, pad_r, pad_b, pad_l
+
+        if expand_vertical:
+            anchor_px = cur_w
+            other_px = cur_h
+            cov_neg, cov_pos = cov_t, cov_b
+        else:
+            anchor_px = cur_h
+            other_px = cur_w
+            cov_neg, cov_pos = cov_l, cov_r
+
+        anchor_is_long = anchor_px >= other_px
+        target_ratio = cls._pick_standard_target_aspect_ratio(
+            anchor_px,
+            other_px,
+            anchor_is_long=anchor_is_long,
+            effective_dpi=effective_dpi,
+        )
+        if target_ratio is None:
+            return pad_t, pad_r, pad_b, pad_l
+
+        target_other = (anchor_px / target_ratio) if anchor_is_long else (anchor_px * target_ratio)
+        deficit = target_other - other_px
+        if deficit <= 1.0 or deficit > other_px * 0.28:
+            return pad_t, pad_r, pad_b, pad_l
+
+        # Keep anchored side(s) fixed and allocate missing expansion onto unanchored side(s).
+        if cov_neg >= 0.45 and cov_pos < 0.35:
+            neg_req, pos_req = 0.0, deficit
+        elif cov_pos >= 0.45 and cov_neg < 0.35:
+            neg_req, pos_req = deficit, 0.0
+        elif cov_neg < 0.35 and cov_pos < 0.35:
+            neg_req, pos_req = deficit * 0.5, deficit * 0.5
+        else:
+            return pad_t, pad_r, pad_b, pad_l
+
+        ph, pw = patch.shape[:2]
+        white_floor = float(bg_fill) - 18.0
+        dark_p10_floor = float(bg_fill) - 48.0
+
+        def safe_extend(is_vertical: bool, direction: int, req_px: float) -> float:
+            steps = int(round(req_px))
+            if steps <= 0:
+                return 0.0
+            gained = 0
+            span_a = max(0, lx1 if is_vertical else ly1)
+            span_b = min((pw - 1) if is_vertical else (ph - 1), lx2 if is_vertical else ly2)
+            if is_vertical:
+                start_pos = ly1 if direction < 0 else ly2
+            else:
+                start_pos = lx1 if direction < 0 else lx2
+            mid_coord = (span_a + span_b) * 0.5
+            for d in range(1, steps + 1):
+                pos = start_pos + direction * d
+                if pos < 2 or pos >= ((ph - 2) if is_vertical else (pw - 2)):
+                    break
+                if is_vertical:
+                    if not local_point_valid(mid_coord, float(pos)):
+                        break
+                    strip = patch[pos, span_a : span_b + 1]
+                else:
+                    if not local_point_valid(float(pos), mid_coord):
+                        break
+                    strip = patch[span_a : span_b + 1, pos]
+                if strip.size == 0:
+                    break
+                if (
+                    float(np.median(strip)) < white_floor
+                    or float(np.percentile(strip, 10)) < dark_p10_floor
+                ):
+                    break
+                gained = d
+            return float(gained)
+
+        if expand_vertical:
+            pad_t += safe_extend(True, -1, neg_req)
+            pad_b += safe_extend(True, 1, pos_req)
+        else:
+            pad_l += safe_extend(False, -1, neg_req)
+            pad_r += safe_extend(False, 1, pos_req)
+
+        return pad_t, pad_r, pad_b, pad_l
 
     @staticmethod
     def _find_paper_to_platen_step(profile: np.ndarray) -> float | None:

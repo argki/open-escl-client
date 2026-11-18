@@ -734,4 +734,39 @@ def test_bordered_postcard_and_text_postcard_crop_tightly_without_platen_halo() 
     assert upper_box.height >= card1_h - 10.0
 
 
+def test_single_edge_shadow_postcard_completes_opposite_side_via_standard_ratio() -> None:
+    """White 100x148mm postcard with only top shadow completes its unanchored bottom side."""
+    # 100 DPI A3 canvas; physical postcard = 148mm (583px) x 100mm (394px).
+    canvas = np.full((1200, 1000, 3), (254, 254, 254), dtype=np.uint8)
+    card_w, card_h = 583, 394
+    x0, y0 = 200, 400
+
+    # Crisp paper-edge shadow ONLY on top long side (583px); bottom & side edges cast no shadow.
+    cv2.line(canvas, (x0, y0), (x0 + card_w, y0), (205, 205, 205), thickness=2)
+
+    # Printed lines occupy y=[426..740] (stopping ~54px above bottom physical edge 794,
+    # with white margin containing sparse edge numbers near x=220).
+    for row_y in range(426, 738, 34):
+        cv2.rectangle(canvas, (x0 + 28, row_y), (x0 + card_w - 34, row_y + 10), (40, 40, 40), -1)
+
+    det_disabled = MultiDocumentDetector(DetectionConfig(aspect_ratio_completion=False))
+    raw_boxes = det_disabled.detect(canvas, dpi=100.0)
+    assert len(raw_boxes) == 1
+    assert raw_boxes[0].width >= 570.0
+    # Without aspect-ratio completion, height stops well short of true 100mm (~394px).
+    assert raw_boxes[0].height < 365.0
+
+    det_enabled = MultiDocumentDetector(DetectionConfig(aspect_ratio_completion=True))
+    completed_boxes = det_enabled.detect(canvas, dpi=100.0)
+    assert len(completed_boxes) == 1
+    cbox = completed_boxes[0]
+    _, cy0, cw, ch = cbox.bounding_rect()
+
+    # Anchored top shadow stays locked around y=400 while unanchored bottom extends to ~394px.
+    assert abs(cy0 - y0) <= 4.0
+    assert cw >= 570.0
+    assert abs(ch - card_h) <= 10.0
+
+
+
 
