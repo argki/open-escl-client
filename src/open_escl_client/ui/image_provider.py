@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize
+from PySide6.QtGui import QColor, QImage, QImageReader
 from PySide6.QtQuick import QQuickImageProvider
+
+
+def _decode_qimage_with_exif(image_bytes: bytes) -> QImage:
+    """Decode image bytes into `QImage`, honoring EXIF Orientation like OpenCV."""
+    buf = QBuffer()
+    buf.setData(QByteArray(image_bytes))
+    buf.open(QIODevice.OpenModeFlag.ReadOnly)
+    reader = QImageReader(buf)
+    reader.setAutoTransform(True)
+    img = reader.read()
+    buf.close()
+    if not img.isNull():
+        return img
+    return QImage.fromData(image_bytes)
 
 
 class PreviewImageProvider(QQuickImageProvider):
@@ -38,7 +52,7 @@ class PreviewImageProvider(QQuickImageProvider):
 
     def update_image_bytes(self, image_bytes: bytes) -> str:
         """Load `image_bytes` into a `QImage`, increment revision, and return URL."""
-        loaded = QImage.fromData(image_bytes)
+        loaded = _decode_qimage_with_exif(image_bytes)
         if loaded.isNull():
             raise ValueError("スキャン画像データのデコードに失敗しました")
         self._current_image = loaded
@@ -47,7 +61,7 @@ class PreviewImageProvider(QQuickImageProvider):
 
     def set_crop_thumbnail(self, index: int, image_bytes: bytes) -> str:
         """Store a single cropped/deskewed thumbnail for 1-based `index` and return its URL."""
-        loaded = QImage.fromData(image_bytes)
+        loaded = _decode_qimage_with_exif(image_bytes)
         if loaded.isNull():
             raise ValueError(f"トリミングサムネイル #{index} のデコードに失敗しました")
         self._crop_thumbnails[int(index)] = loaded

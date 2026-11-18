@@ -344,3 +344,66 @@ def test_auto_crop_disabled_keeps_full_page_and_applies_auto_orientation() -> No
     assert len(docs) == 1
     assert docs[0].rotation_cw_deg == 180
     assert np.array_equal(docs[0].image, upright)
+    assert len(pipeline.last_processed_documents) == 1
+    assert pipeline.last_processed_documents[0].rotation_cw_deg == 180
+
+
+def test_landscape_a4_preview_auto_90_rotation_persists_into_saved_jpeg_and_pdf(
+    tmp_path: Path,
+) -> None:
+    """Landscape-scanned A4 needing 90° CW rotation saves upright portrait JPEG and PDF files."""
+    upright = _render_portrait_letter_doc("A4 NOTICE", width=560, height=780)
+    # Sideways scan (rotated 270° CW / 90° CCW) -> needs 90° CW to stand upright.
+    sideways = rotate_image_cw(upright, 270)
+    assert sideways.shape[1] > sideways.shape[0]  # landscape input
+
+    detector = MultiDocumentDetector()
+    preview_boxes = detector.detect(sideways, dpi=100.0)
+    assert len(preview_boxes) == 1
+    preview_boxes = [preview_boxes[0].with_auto_rotation(90)]
+
+    platen, a3 = _make_platen_and_a3()
+    sideways_jpeg = encode_image_bytes(sideways, fmt="JPEG", quality=92)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=sideways_jpeg,
+        content_type="image/jpeg",
+        job_url="http://192.168.100.13:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    pipeline = MultiCropScanPipeline(
+        MultiCropPipelineConfig(
+            auto_crop_enabled=True,
+            multi_document_enabled=True,
+            auto_orientation_enabled=True,
+            target_dpi=300.0,
+        ),
+        orientation_corrector=_heuristic_corrector(),
+    )
+    profile = ScanSaveProfile(
+        base_url="http://192.168.100.13:80/eSCL",
+        source_caps=platen,
+        paper_size=a3,
+        save_dir=tmp_path,
+        naming_template="Rotated_{seq:03d}",
+        file_format="JPEG",
+        resolution_dpi=300,
+        post_processor=pipeline.as_post_processor(
+            preview_boxes=preview_boxes,
+            consume_preview_boxes_once=True,
+        ),
+    )
+    session = ContinuousScanSession(profile, scan_client_factory=lambda _url: mock_client)
+
+    # 1st scan uses preview-confirmed 90° CW rotation.
+    step1 = session.scan_and_save_next(now=FIXED_NOW)
+    out1 = step1.saved_results[0].output_path
+    with Image.open(out1) as saved1:
+        assert saved1.height > saved1.width
+
+    # 2nd continuous scan auto-detects and rotates 90° CW on the fresh scan too.
+    step2 = session.scan_and_save_next(now=FIXED_NOW)
+    out2 = step2.saved_results[0].output_path
+    with Image.open(out2) as saved2:
+        assert saved2.height > saved2.width

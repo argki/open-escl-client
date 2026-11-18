@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import platform
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -38,6 +40,8 @@ from open_escl_client.imaging.multi_crop import (
     decode_image_bytes,
     normalize_rotation_cw,
 )
+
+logger = logging.getLogger(__name__)
 
 VALID_ROTATIONS: tuple[RotationDeg, ...] = (0, 90, 180, 270)
 
@@ -100,7 +104,7 @@ class OrientationConfig:
     prefer_native_backend: bool = True
     max_analysis_dimension: int = 1200
     recognition_languages: tuple[str, ...] = ("ja-JP", "en-US")
-    vision_timeout_sec: float = 15.0
+    vision_timeout_sec: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,7 +314,7 @@ class MacOSVisionOrientationBackend:
     def __init__(self, cache_dir: Path | None = None) -> None:
         self._cache_dir = cache_dir
         self._compiled_binary: Path | None = None
-        self._compile_attempted = False
+        self._compile_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -344,51 +348,60 @@ class MacOSVisionOrientationBackend:
     def _ensure_helper_binary(self) -> Path | None:
         if self._compiled_binary is not None and self._compiled_binary.exists():
             return self._compiled_binary
-        if self._compile_attempted:
-            return None
 
-        self._compile_attempted = True
-        swiftc = shutil.which("swiftc")
-        if swiftc is None:
-            return None
+        with self._compile_lock:
+            if self._compiled_binary is not None and self._compiled_binary.exists():
+                return self._compiled_binary
 
-        src_hash = hashlib.sha256(_SWIFT_VISION_HELPER_SOURCE.encode("utf-8")).hexdigest()[:12]
-        cache_dir = self._resolve_cache_dir()
-        bin_path = cache_dir / f"vision_orientation_helper_{src_hash}"
-        if bin_path.exists() and os.access(bin_path, os.X_OK):
-            self._compiled_binary = bin_path
-            return bin_path
+            swiftc = shutil.which("swiftc")
+            if swiftc is None:
+                return None
 
-        src_path = cache_dir / f"vision_orientation_helper_{src_hash}.swift"
-        mod_cache = cache_dir / "module_cache"
-        mod_cache.mkdir(parents=True, exist_ok=True)
-        tmp_bin = cache_dir / f".vision_orientation_helper_{src_hash}.{os.getpid()}.tmp"
-        try:
-            src_path.write_text(_SWIFT_VISION_HELPER_SOURCE, encoding="utf-8")
-            proc = subprocess.run(
-                [
-                    swiftc,
-                    "-O",
-                    "-module-cache-path",
-                    str(mod_cache),
-                    str(src_path),
-                    "-o",
-                    str(tmp_bin),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=45.0,
-                check=False,
+            src_hash = hashlib.sha256(_SWIFT_VISION_HELPER_SOURCE.encode("utf-8")).hexdigest()[:12]
+            cache_dir = self._resolve_cache_dir()
+            bin_path = cache_dir / f"vision_orientation_helper_{src_hash}"
+            if bin_path.exists() and os.access(bin_path, os.X_OK):
+                self._compiled_binary = bin_path
+                return bin_path
+
+            src_path = cache_dir / f"vision_orientation_helper_{src_hash}.swift"
+            mod_cache = cache_dir / "module_cache"
+            mod_cache.mkdir(parents=True, exist_ok=True)
+            tmp_bin = cache_dir / (
+                f".vision_orientation_helper_{src_hash}.{os.getpid()}.{threading.get_ident()}.tmp"
             )
-            if proc.returncode != 0 or not tmp_bin.exists():
+            try:
+                src_path.write_text(_SWIFT_VISION_HELPER_SOURCE, encoding="utf-8")
+                proc = subprocess.run(
+                    [
+                        swiftc,
+                        "-O",
+                        "-module-cache-path",
+                        str(mod_cache),
+                        str(src_path),
+                        "-o",
+                        str(tmp_bin),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60.0,
+                    check=False,
+                )
+                if proc.returncode != 0 or not tmp_bin.exists():
+                    logger.warning(
+                        "Failed to compile macOS Vision helper (rc=%s): %s",
+                        proc.returncode,
+                        proc.stderr.strip(),
+                    )
+                    tmp_bin.unlink(missing_ok=True)
+                    return None
+                tmp_bin.replace(bin_path)
+                self._compiled_binary = bin_path
+                return bin_path
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.warning("macOS Vision helper compilation error: %s", exc)
                 tmp_bin.unlink(missing_ok=True)
                 return None
-            tmp_bin.replace(bin_path)
-            self._compiled_binary = bin_path
-            return bin_path
-        except (OSError, subprocess.SubprocessError):
-            tmp_bin.unlink(missing_ok=True)
-            return None
 
     def estimate(
         self,
@@ -726,7 +739,8 @@ class AutoOrientationCorrector:
                 continue
             try:
                 estimate = backend.estimate(bgr, self.config)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Orientation backend '%s' failed: %s", backend.name, exc)
                 continue
 
             last_estimate = estimate

@@ -813,6 +813,21 @@ class MultiDocumentDetector:
 
         filtered = self._suppress_contained_boxes(candidates)
         if not filtered:
+            if self.config.full_page_paper_fallback and self._has_full_page_printed_ink(work_bgr):
+                return [
+                    RotatedCropBox(
+                        center_x=orig_w * 0.5,
+                        center_y=orig_h * 0.5,
+                        width=float(orig_w),
+                        height=float(orig_h),
+                        angle_deg=0.0,
+                        confidence=1.0,
+                        index=1,
+                        source_width=orig_w,
+                        source_height=orig_h,
+                        source_dpi=float(dpi),
+                    )
+                ]
             return []
 
         if self.config.full_page_paper_fallback and self._is_printed_content_on_full_page(
@@ -1076,6 +1091,30 @@ class MultiDocumentDetector:
                 return False
 
         return True
+
+    def _has_full_page_printed_ink(self, work_bgr: np.ndarray) -> bool:
+        """Detect text-only full-page white documents whose thin strokes form no large contour."""
+        h, w = work_bgr.shape[:2]
+        if min(h, w) < 40:
+            return False
+
+        lab = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2LAB)
+        bg_lab, bg_sigma = self._estimate_background_stats(lab)
+        bg_l = float(bg_lab[0])
+        bg_chroma = math.hypot(float(bg_lab[1]) - 128.0, float(bg_lab[2]) - 128.0)
+        if bg_l < 185.0 or bg_chroma > 24.0:
+            return False
+
+        mx = max(4, int(round(w * 0.03)))
+        my = max(4, int(round(h * 0.03)))
+        interior_l = lab[my : h - my, mx : w - mx, 0].astype(np.float32)
+        if interior_l.size == 0:
+            return False
+
+        ink_drop = max(self.config.printed_border_ink_drop_l, bg_sigma * 6.0 + 25.0)
+        ink_mask = (bg_l - interior_l) >= ink_drop
+        ink_ratio = float(np.count_nonzero(ink_mask)) / float(interior_l.size)
+        return ink_ratio >= 0.0025
 
     @staticmethod
     def _fill_external_contours(binary_mask: np.ndarray) -> np.ndarray:

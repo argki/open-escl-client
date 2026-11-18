@@ -222,6 +222,7 @@ class AppViewModel(QObject):
         self._crop_thumbnail_urls: dict[int, str] = {}
         self._selected_crop_index: int = -1
         self._preview_boxes_ready_for_save: bool = False
+        self._last_scan_pipeline: MultiCropScanPipeline | None = None
 
         self._continuous_session: ContinuousScanSession | None = None
         self._saved_file_count: int = 0
@@ -545,6 +546,7 @@ class AppViewModel(QObject):
                 self._crop_boxes = [
                     box.with_uniform_margin(clamped, unit="mm") for box in self._crop_boxes
                 ]
+                self._preview_boxes_ready_for_save = True
                 self._rebuild_all_crop_thumbnails()
                 self.cropBoxesChanged.emit()
 
@@ -743,6 +745,7 @@ class AppViewModel(QObject):
             dx_px, dy_px
         )
         self._selected_crop_index = list_index
+        self._preview_boxes_ready_for_save = True
         self._rebuild_crop_thumbnail(list_index)
         self.cropBoxesChanged.emit()
 
@@ -767,6 +770,7 @@ class AppViewModel(QObject):
             dpi=dpi,
         )
         self._selected_crop_index = list_index
+        self._preview_boxes_ready_for_save = True
         self._rebuild_crop_thumbnail(list_index)
         self.cropBoxesChanged.emit()
 
@@ -779,6 +783,7 @@ class AppViewModel(QObject):
             int(delta_cw_deg)
         )
         self._selected_crop_index = list_index
+        self._preview_boxes_ready_for_save = True
         self._rebuild_crop_thumbnail(list_index)
         self.cropBoxesChanged.emit()
 
@@ -801,6 +806,7 @@ class AppViewModel(QObject):
         box = self._crop_boxes[self._selected_crop_index]
         if abs(box.manual_angle_offset_deg - clamped) > 1e-6:
             self._crop_boxes[self._selected_crop_index] = box.with_manual_angle_offset(clamped)
+            self._preview_boxes_ready_for_save = True
             self._rebuild_crop_thumbnail(self._selected_crop_index)
             self.cropBoxesChanged.emit()
 
@@ -817,6 +823,7 @@ class AppViewModel(QObject):
             manual_angle_offset_deg=0.0,
             manual_rotation_cw_deg=None,
         )
+        self._preview_boxes_ready_for_save = True
         self._rebuild_crop_thumbnail(self._selected_crop_index)
         self.cropBoxesChanged.emit()
 
@@ -1059,6 +1066,7 @@ class AppViewModel(QObject):
             paper_opt = self._paper_size_resolver.resolve_for_source(active_caps)[0]
 
         post_processor = None
+        self._last_scan_pipeline = None
         if self._auto_crop_enabled or self._auto_orientation_enabled:
             pipeline = MultiCropScanPipeline(
                 MultiCropPipelineConfig(
@@ -1071,9 +1079,19 @@ class AppViewModel(QObject):
                 deskew_processor=self._deskew_processor,
                 orientation_corrector=self._orientation_corrector,
             )
+            self._last_scan_pipeline = pipeline
+            same_paper_as_preview = (
+                self._preview_session is not None
+                and self._preview_session.paper_size.code == paper_opt.code
+            )
             confirmed_boxes = (
                 list(self._crop_boxes)
-                if (self._auto_crop_enabled and self._preview_boxes_ready_for_save and self._crop_boxes)
+                if (
+                    self._auto_crop_enabled
+                    and self._preview_boxes_ready_for_save
+                    and same_paper_as_preview
+                    and self._crop_boxes
+                )
                 else None
             )
             post_processor = pipeline.as_post_processor(
@@ -1105,15 +1123,16 @@ class AppViewModel(QObject):
         self._preview_boxes_ready_for_save = False
         self._clear_crop_boxes()
 
-        # Show the newly scanned & processed image on the preview canvas as confirmation
+        # Sync preview canvas and internal decoded preview state to the saved output image
         try:
             url = self._image_provider.update_image_bytes(result_obj.last_image_bytes)
             self._preview_image_url = url
-            if self._preview_session is None and self._continuous_session is not None:
+            self._preview_bgr = decode_image_bytes(result_obj.last_image_bytes)
+            if self._continuous_session is not None:
                 prof = self._continuous_session.profile
                 self._preview_session = PreviewSession(
                     image_bytes=result_obj.last_image_bytes,
-                    content_type="image/jpeg",
+                    content_type="image/png",
                     image_width_px=self._image_provider.current_image.width(),
                     image_height_px=self._image_provider.current_image.height(),
                     preview_dpi=prof.resolution_dpi,
@@ -1124,6 +1143,16 @@ class AppViewModel(QObject):
         except Exception:
             pass
 
+        applied_rotations = (
+            [doc.rotation_cw_deg for doc in self._last_scan_pipeline.last_processed_documents]
+            if self._last_scan_pipeline is not None
+            else []
+        )
+        rot_note = ""
+        if any(r != 0 for r in applied_rotations):
+            rot_summary = "/".join(f"{r}°" for r in applied_rotations)
+            rot_note = f" / 回転 {rot_summary}"
+
         self._saved_file_count = result_obj.total_saved_files
         self._pending_pdf_page_count = result_obj.buffered_page_count
         if result_obj.saved_results:
@@ -1133,16 +1162,16 @@ class AppViewModel(QObject):
             self._last_saved_file_name = last_path.name
             if saved_count > 1:
                 self.set_status_message(
-                    f"{saved_count}件を一括保存しました (累計 {self._saved_file_count}件): "
+                    f"{saved_count}件を一括保存しました (累計 {self._saved_file_count}件{rot_note}): "
                     f"{first_name} 〜 {last_path.name} — 次の原稿を置いて続けてスキャンできます"
                 )
             else:
                 self.set_status_message(
-                    f"保存完了 ({self._saved_file_count}件目): {last_path} — 次の原稿を置いて続けてスキャンできます"
+                    f"保存完了 ({self._saved_file_count}件目{rot_note}): {last_path} — 次の原稿を置いて続けてスキャンできます"
                 )
         else:
             self.set_status_message(
-                f"マルチページPDFに {self._pending_pdf_page_count} ページ目を追加しました（続けてスキャン、または「PDFを保存して完了」）"
+                f"マルチページPDFに {self._pending_pdf_page_count} ページ目を追加しました{rot_note}（続けてスキャン、または「PDFを保存して完了」）"
             )
         self.scanSaveChanged.emit()
         self._refresh_next_filename_preview()

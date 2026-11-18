@@ -68,6 +68,12 @@ class MultiCropScanPipeline:
         self.config = config or MultiCropPipelineConfig()
         self._deskew_processor = deskew_processor or DeskewCropProcessor()
         self._orientation_corrector = orientation_corrector or AutoOrientationCorrector()
+        self._last_processed_documents: tuple[ProcessedDocument, ...] = ()
+
+    @property
+    def last_processed_documents(self) -> tuple[ProcessedDocument, ...]:
+        """Return documents produced by the most recent `process_documents` invocation."""
+        return self._last_processed_documents
 
     def process_documents(
         self,
@@ -104,7 +110,9 @@ class MultiCropScanPipeline:
                 source_height=img_h,
                 source_dpi=dpi,
             )
-            return [self._orient_and_encode(bgr, full_box, forced_rotation=None)]
+            docs = [self._orient_and_encode(bgr, full_box, forced_rotation=None)]
+            self._last_processed_documents = tuple(docs)
+            return docs
 
         # Case 2: Preview-confirmed boxes supplied — scale them to main-scan resolution.
         if preview_boxes:
@@ -136,17 +144,27 @@ class MultiCropScanPipeline:
                         )
                     )
                 elif self.config.auto_orientation_enabled:
-                    rot = box.effective_rotation_cw_deg
-                    rotated_img = rotate_image_cw(cropped.image, rot)
-                    results.append(
-                        ProcessedDocument(
-                            image=rotated_img,
-                            box=cropped.box,
-                            rotation_cw_deg=rot,
-                            orientation_source="preview_auto",
-                            encoded_bytes=self._encode(rotated_img),
+                    if box.auto_rotation_cw_deg != 0:
+                        rot = box.effective_rotation_cw_deg
+                        rotated_img = rotate_image_cw(cropped.image, rot)
+                        results.append(
+                            ProcessedDocument(
+                                image=rotated_img,
+                                box=cropped.box,
+                                rotation_cw_deg=rot,
+                                orientation_source="preview_auto",
+                                encoded_bytes=self._encode(rotated_img),
+                            )
                         )
-                    )
+                    else:
+                        # Re-check at high DPI in case low-DPI preview could not read tiny text.
+                        results.append(
+                            self._orient_and_encode(
+                                cropped.image,
+                                cropped.box,
+                                forced_rotation=None,
+                            )
+                        )
                 else:
                     results.append(
                         ProcessedDocument(
@@ -157,6 +175,7 @@ class MultiCropScanPipeline:
                             encoded_bytes=self._encode(cropped.image),
                         )
                     )
+            self._last_processed_documents = tuple(results)
             return results
 
         # Case 3: Fresh automatic detection on main-scan image (e.g. continuous scan 2nd+ page).
@@ -176,7 +195,9 @@ class MultiCropScanPipeline:
                 source_height=img_h,
                 source_dpi=dpi,
             )
-            return [self._orient_and_encode(bgr, fallback_box, forced_rotation=None)]
+            docs = [self._orient_and_encode(bgr, fallback_box, forced_rotation=None)]
+            self._last_processed_documents = tuple(docs)
+            return docs
 
         results = []
         for raw_box in detected:
@@ -194,6 +215,7 @@ class MultiCropScanPipeline:
             results.append(
                 self._orient_and_encode(cropped.image, cropped.box, forced_rotation=None)
             )
+        self._last_processed_documents = tuple(results)
         return results
 
     def as_post_processor(
