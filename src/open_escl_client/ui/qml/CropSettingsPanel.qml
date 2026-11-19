@@ -53,6 +53,105 @@ GroupBox {
             }
         }
 
+        // 検出パターン（原稿タイプ：自動判別 / レシート・複数小原稿 / 単票・定型紙 / 全面）
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+            enabled: viewModel ? viewModel.autoCropEnabled : true
+
+            Label {
+                text: "検出パターン（原稿タイプ）"
+                font.bold: true
+                color: "#374151"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            ComboBox {
+                id: detectionPresetComboBox
+                objectName: "detectionPresetComboBox"
+                Layout.fillWidth: true
+                model: viewModel ? viewModel.detectionPresets : []
+                currentIndex: {
+                    if (!viewModel || !model) return 0
+                    var idx = model.indexOf(viewModel.selectedDetectionPreset)
+                    return idx >= 0 ? idx : 0
+                }
+                onActivated: function(index) {
+                    if (viewModel && model[index]) {
+                        viewModel.selectedDetectionPreset = model[index]
+                    }
+                }
+            }
+
+            Label {
+                id: resolvedPresetLabel
+                objectName: "resolvedPresetLabel"
+                visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled) : false
+                text: viewModel ? viewModel.resolvedDetectionPresetLabel : ""
+                font.pixelSize: 11
+                font.bold: true
+                color: "#1D4ED8"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+        }
+
+        // 検出感度（-5〜+5: プラスで薄い紙のフチや白地を広く検出、マイナスで影やゴミを抑制）
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 2
+            enabled: viewModel ? viewModel.autoCropEnabled : true
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label {
+                    text: viewModel && viewModel.selectedCropIndex >= 0
+                          ? ("選択枠 #" + (viewModel.selectedCropIndex + 1) + " の検出感度")
+                          : "全体の検出感度"
+                    font.bold: true
+                    color: "#374151"
+                }
+                Item { Layout.fillWidth: true }
+                Label {
+                    objectName: "detectionSensitivityValueLabel"
+                    readonly property int sensVal: Math.round(detectionSensitivitySlider.value)
+                    text: (sensVal > 0 ? "+" : "") + sensVal + (sensVal === 0 ? " (標準)" : (sensVal > 0 ? " (高感度)" : " (控えめ)"))
+                    font.bold: true
+                    color: sensVal > 0 ? "#1D4ED8" : (sensVal < 0 ? "#B45309" : "#4B5563")
+                }
+            }
+
+            Slider {
+                id: detectionSensitivitySlider
+                objectName: "detectionSensitivitySlider"
+                Layout.fillWidth: true
+                from: -5
+                to: 5
+                stepSize: 1
+                snapMode: Slider.SnapAlways
+                value: viewModel ? viewModel.selectedCropSensitivity : 0
+                onPressedChanged: {
+                    if (!pressed && viewModel) {
+                        viewModel.selectedCropSensitivity = Math.round(value)
+                    }
+                }
+                onMoved: {
+                    if (!pressed && viewModel) {
+                        viewModel.selectedCropSensitivity = Math.round(value)
+                    }
+                }
+            }
+
+            Label {
+                text: "プラスで薄い紙の境界を広く検出、マイナスで影・ゴミを抑制"
+                font.pixelSize: 11
+                color: "#6B7280"
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+        }
+
         // 余白の一括微調整（mm: 負値で内側に削る／正値で外側に広げる）
         ColumnLayout {
             Layout.fillWidth: true

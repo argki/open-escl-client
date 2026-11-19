@@ -16,11 +16,13 @@ import numpy as np
 from open_escl_client.imaging.multi_crop import (
     DeskewCropProcessor,
     DetectionConfig,
+    DetectionPreset,
     MultiDocumentDetector,
     RotatedCropBox,
     RotationDeg,
     decode_image_bytes,
     encode_image_bytes,
+    normalize_detection_preset,
     scale_crop_boxes,
 )
 from open_escl_client.imaging.orientation import (
@@ -38,6 +40,8 @@ class MultiCropPipelineConfig:
     auto_crop_enabled: bool = True
     multi_document_enabled: bool = True
     auto_orientation_enabled: bool = True
+    detection_preset: DetectionPreset = "auto"
+    detection_sensitivity: int = 0
     margin_mm: float = 0.0
     target_dpi: float = 300.0
     output_format: Literal["PNG", "JPEG"] = "PNG"
@@ -180,7 +184,11 @@ class MultiCropScanPipeline:
 
         # Case 3: Fresh automatic detection on main-scan image (e.g. continuous scan 2nd+ page).
         detector = MultiDocumentDetector(
-            DetectionConfig(multi_document=self.config.multi_document_enabled)
+            DetectionConfig(
+                multi_document=self.config.multi_document_enabled,
+                detection_preset=normalize_detection_preset(self.config.detection_preset),
+                detection_sensitivity=self.config.detection_sensitivity,
+            )
         )
         detected = detector.detect(bgr, dpi=dpi)
         if not detected:

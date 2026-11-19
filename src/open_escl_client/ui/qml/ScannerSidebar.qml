@@ -36,6 +36,7 @@ Rectangle {
             GroupBox {
                 title: "1. スキャナ選択 (eSCL / AirScan)"
                 Layout.fillWidth: true
+                Layout.maximumWidth: parent.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
@@ -109,6 +110,7 @@ Rectangle {
             GroupBox {
                 title: "2. 読み取り設定（給紙元・サイズ・解像度）"
                 Layout.fillWidth: true
+                Layout.maximumWidth: parent.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
@@ -213,6 +215,7 @@ Rectangle {
             // ----------------------------------------------------------------
             CropSettingsPanel {
                 Layout.fillWidth: true
+                Layout.maximumWidth: parent.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
             }
@@ -222,6 +225,7 @@ Rectangle {
             // ----------------------------------------------------------------
             SaveSettingsPanel {
                 Layout.fillWidth: true
+                Layout.maximumWidth: parent.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
             }
