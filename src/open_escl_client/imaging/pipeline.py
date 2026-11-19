@@ -14,6 +14,7 @@ from typing import Literal
 import numpy as np
 
 from open_escl_client.imaging.multi_crop import (
+    AspectRatioPreset,
     DeskewCropProcessor,
     DetectionConfig,
     DetectionPreset,
@@ -22,6 +23,7 @@ from open_escl_client.imaging.multi_crop import (
     RotationDeg,
     decode_image_bytes,
     encode_image_bytes,
+    normalize_aspect_ratio_preset,
     normalize_detection_preset,
     scale_crop_boxes,
 )
@@ -41,6 +43,7 @@ class MultiCropPipelineConfig:
     multi_document_enabled: bool = True
     auto_orientation_enabled: bool = True
     detection_preset: DetectionPreset = "auto"
+    aspect_ratio_preset: AspectRatioPreset = "auto"
     detection_sensitivity: int = 0
     margin_mm: float = 0.0
     target_dpi: float = 300.0
@@ -187,6 +190,9 @@ class MultiCropScanPipeline:
             DetectionConfig(
                 multi_document=self.config.multi_document_enabled,
                 detection_preset=normalize_detection_preset(self.config.detection_preset),
+                aspect_ratio_preset=normalize_aspect_ratio_preset(
+                    self.config.aspect_ratio_preset
+                ),
                 detection_sensitivity=self.config.detection_sensitivity,
             )
         )

@@ -694,7 +694,13 @@ def test_viewmodel_detection_preset_selection_and_a4_on_a3_auto_resolution() -> 
     crop_panel = root.findChild(QObject, "cropSettingsPanel")
     save_panel = root.findChild(QObject, "saveSettingsPanel")
     sens_slider = root.findChild(QObject, "detectionSensitivitySlider")
-    assert crop_panel is not None and save_panel is not None and sens_slider is not None
+    ratio_combo = root.findChild(QObject, "aspectRatioPresetComboBox")
+    assert (
+        crop_panel is not None
+        and save_panel is not None
+        and sens_slider is not None
+        and ratio_combo is not None
+    )
     assert float(crop_panel.property("width")) <= float(save_panel.property("width")) + 1.0
     for obj in engine.rootObjects():
         obj.deleteLater()
@@ -787,5 +793,16 @@ def test_viewmodel_per_crop_sensitivity_redetects_only_selected_box(tmp_path: Pa
     # Switching selection to box #2 shows its own untouched sensitivity (0).
     vm.selectCropBox(1)
     assert vm.selectedCropSensitivity == 0
+    assert vm.selectedCropAspectRatioPreset == "自動判別 (推奨)"
+
+    # Changing aspect ratio preset on box #2 leaves box #1 untouched.
+    assert "A判・B判 / 白銀比 (1:1.414)" in vm.aspectRatioPresets
+    assert "はがき (100×148mm / 1:1.480)" in vm.aspectRatioPresets
+    assert "L判写真 (89×127mm / 1:1.427)" in vm.aspectRatioPresets
+    vm.selectedCropAspectRatioPreset = "A判・B判 / 白銀比 (1:1.414)"
+    assert vm.selectedCropAspectRatioPreset == "A判・B判 / 白銀比 (1:1.414)"
+    vm.selectCropBox(0)
+    assert vm.selectedCropAspectRatioPreset == "自動判別 (推奨)"
+
 
 

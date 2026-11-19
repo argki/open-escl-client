@@ -42,12 +42,14 @@ from open_escl_client.imaging.multi_crop import (
     CropMarginOffsets,
     DeskewCropProcessor,
     DetectionConfig,
+    AspectRatioPreset,
     DetectionPreset,
     MultiDocumentDetector,
     ResolvedDetectionPreset,
     RotatedCropBox,
     decode_image_bytes,
     encode_image_bytes,
+    normalize_aspect_ratio_preset,
     normalize_detection_preset,
 )
 from open_escl_client.imaging.orientation import (
@@ -83,6 +85,21 @@ RESOLVED_PRESET_SHORT_LABELS: dict[ResolvedDetectionPreset, str] = {
     "receipt_multi": "レシート・複数小原稿",
     "standard_sheet": "単票・定型紙 (A3内のA4等)",
     "full_page": "スキャン範囲全面",
+}
+
+ASPECT_RATIO_PRESET_LABELS: dict[AspectRatioPreset, str] = {
+    "auto": "自動判別 (推奨)",
+    "iso_a_b": "A判・B判 / 白銀比 (1:1.414)",
+    "postcard": "はがき (100×148mm / 1:1.480)",
+    "l_photo": "L判写真 (89×127mm / 1:1.427)",
+    "kg_photo": "KG判写真 (102×152mm / 1:1.490)",
+    "2l_photo": "2L判写真 (127×178mm / 1:1.402)",
+    "business_card": "名刺 (55×91mm / 1:1.655)",
+    "free": "比率補完なし (実検出のまま)",
+}
+
+LABEL_TO_ASPECT_RATIO_PRESET: dict[str, AspectRatioPreset] = {
+    v: k for k, v in ASPECT_RATIO_PRESET_LABELS.items()
 }
 
 DEFAULT_PLATEN_CAPS = InputSourceCaps(
@@ -239,10 +256,12 @@ class AppViewModel(QObject):
         self._auto_orientation_enabled: bool = True
         self._detection_preset: DetectionPreset = "auto"
         self._resolved_detection_preset: ResolvedDetectionPreset = "receipt_multi"
+        self._aspect_ratio_preset: AspectRatioPreset = "auto"
         self._detection_sensitivity: int = 0
         self._crop_margin_mm: float = 0.0
         self._crop_boxes: list[RotatedCropBox] = []
         self._crop_sensitivities: list[int] = []
+        self._crop_aspect_ratios: list[AspectRatioPreset] = []
         self._crop_thumbnail_urls: dict[int, str] = {}
         self._selected_crop_index: int = -1
         self._preview_boxes_ready_for_save: bool = False
@@ -616,6 +635,42 @@ class AppViewModel(QObject):
             if self._auto_crop_enabled and self._preview_bgr is not None:
                 self._analyze_preview_crops()
 
+    @Property(list, constant=True)
+    def aspectRatioPresets(self) -> list[str]:
+        return list(ASPECT_RATIO_PRESET_LABELS.values())
+
+    @Property(str, notify=cropBoxesChanged)
+    def selectedCropAspectRatioPreset(self) -> str:
+        code = (
+            self._crop_aspect_ratios[self._selected_crop_index]
+            if 0 <= self._selected_crop_index < len(self._crop_aspect_ratios)
+            else self._aspect_ratio_preset
+        )
+        return ASPECT_RATIO_PRESET_LABELS.get(code, ASPECT_RATIO_PRESET_LABELS["auto"])
+
+    @selectedCropAspectRatioPreset.setter
+    def selectedCropAspectRatioPreset(self, value: str) -> None:
+        preset = LABEL_TO_ASPECT_RATIO_PRESET.get(value) or normalize_aspect_ratio_preset(value)
+        if 0 <= self._selected_crop_index < len(self._crop_boxes):
+            cur = (
+                self._crop_aspect_ratios[self._selected_crop_index]
+                if self._selected_crop_index < len(self._crop_aspect_ratios)
+                else self._aspect_ratio_preset
+            )
+            if cur != preset:
+                sens = (
+                    self._crop_sensitivities[self._selected_crop_index]
+                    if self._selected_crop_index < len(self._crop_sensitivities)
+                    else self._detection_sensitivity
+                )
+                self._redetect_single_crop_at(self._selected_crop_index, sens, preset)
+            return
+        if self._aspect_ratio_preset != preset:
+            self._aspect_ratio_preset = preset
+            self.cropSettingsChanged.emit()
+            if self._auto_crop_enabled and self._preview_bgr is not None:
+                self._analyze_preview_crops()
+
     @Property(int, notify=cropBoxesChanged)
     def selectedCropSensitivity(self) -> int:
         if 0 <= self._selected_crop_index < len(self._crop_sensitivities):
@@ -632,7 +687,12 @@ class AppViewModel(QObject):
                 else self._detection_sensitivity
             )
             if cur != clamped:
-                self._redetect_single_crop_at(self._selected_crop_index, clamped)
+                ratio = (
+                    self._crop_aspect_ratios[self._selected_crop_index]
+                    if self._selected_crop_index < len(self._crop_aspect_ratios)
+                    else self._aspect_ratio_preset
+                )
+                self._redetect_single_crop_at(self._selected_crop_index, clamped, ratio)
             return
         self.detectionSensitivity = clamped
 
@@ -730,6 +790,7 @@ class AppViewModel(QObject):
     def _clear_crop_boxes(self) -> None:
         self._crop_boxes = []
         self._crop_sensitivities = []
+        self._crop_aspect_ratios = []
         self._crop_thumbnail_urls = {}
         self._selected_crop_index = -1
         self._image_provider.clear_crop_thumbnails()
@@ -784,6 +845,7 @@ class AppViewModel(QObject):
             DetectionConfig(
                 multi_document=self._multi_document_enabled,
                 detection_preset=self._detection_preset,
+                aspect_ratio_preset=self._aspect_ratio_preset,
                 detection_sensitivity=self._detection_sensitivity,
             )
         )
@@ -823,12 +885,18 @@ class AppViewModel(QObject):
 
         self._crop_boxes = analyzed
         self._crop_sensitivities = [self._detection_sensitivity] * len(analyzed)
+        self._crop_aspect_ratios = [self._aspect_ratio_preset] * len(analyzed)
         self._selected_crop_index = 0 if analyzed else -1
         self._preview_boxes_ready_for_save = bool(analyzed)
         self.cropBoxesChanged.emit()
 
-    def _redetect_single_crop_at(self, list_index: int, sensitivity: int) -> None:
-        """Re-run detection for only the crop box at `list_index` using `sensitivity`."""
+    def _redetect_single_crop_at(
+        self,
+        list_index: int,
+        sensitivity: int,
+        aspect_ratio_preset: AspectRatioPreset,
+    ) -> None:
+        """Re-run detection for only the crop box at `list_index`."""
         if (
             self._preview_bgr is None
             or self._preview_session is None
@@ -861,6 +929,7 @@ class AppViewModel(QObject):
             DetectionConfig(
                 multi_document=self._multi_document_enabled,
                 detection_preset=self._detection_preset,
+                aspect_ratio_preset=aspect_ratio_preset,
                 detection_sensitivity=sensitivity,
             )
         )
@@ -868,7 +937,10 @@ class AppViewModel(QObject):
 
         while len(self._crop_sensitivities) < len(self._crop_boxes):
             self._crop_sensitivities.append(self._detection_sensitivity)
+        while len(self._crop_aspect_ratios) < len(self._crop_boxes):
+            self._crop_aspect_ratios.append(self._aspect_ratio_preset)
         self._crop_sensitivities[list_index] = sensitivity
+        self._crop_aspect_ratios[list_index] = aspect_ratio_preset
 
         if detected:
             target_box = self._crop_boxes[list_index]
@@ -1264,6 +1336,7 @@ class AppViewModel(QObject):
                     multi_document_enabled=self._multi_document_enabled,
                     auto_orientation_enabled=self._auto_orientation_enabled,
                     detection_preset=self._detection_preset,
+                    aspect_ratio_preset=self._aspect_ratio_preset,
                     detection_sensitivity=self._detection_sensitivity,
                     margin_mm=self._crop_margin_mm,
                     target_dpi=float(self._selected_resolution),

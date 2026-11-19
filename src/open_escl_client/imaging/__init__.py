@@ -1,8 +1,11 @@
 """Image processing pipelines (cropping, deskew, orientation, color calibration)."""
 
 from open_escl_client.imaging.multi_crop import (
+    ASPECT_RATIO_PRESET_RATIOS,
     MM_PER_INCH,
+    VALID_ASPECT_RATIO_PRESETS,
     VALID_DETECTION_PRESETS,
+    AspectRatioPreset,
     BackgroundMode,
     CropMarginOffsets,
     CroppedDocument,
@@ -20,6 +23,7 @@ from open_escl_client.imaging.multi_crop import (
     decode_image_bytes,
     encode_image_bytes,
     mm_to_px,
+    normalize_aspect_ratio_preset,
     normalize_detection_preset,
     normalize_rotation_cw,
     px_to_mm,
@@ -44,6 +48,8 @@ from open_escl_client.imaging.pipeline import (
 )
 
 __all__ = [
+    "ASPECT_RATIO_PRESET_RATIOS",
+    "AspectRatioPreset",
     "AutoOrientationCorrector",
     "BackgroundMode",
     "CropMarginOffsets",
@@ -69,11 +75,13 @@ __all__ = [
     "ResolvedDetectionPreset",
     "RotatedCropBox",
     "RotationDeg",
+    "VALID_ASPECT_RATIO_PRESETS",
     "VALID_DETECTION_PRESETS",
     "VALID_ROTATIONS",
     "decode_image_bytes",
     "encode_image_bytes",
     "mm_to_px",
+    "normalize_aspect_ratio_preset",
     "normalize_detection_preset",
     "normalize_rotation_cw",
     "px_to_mm",
