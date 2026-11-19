@@ -97,6 +97,61 @@ GroupBox {
             }
         }
 
+        // 検出感度（-5〜+5: プラスで薄い紙のフチや白地を広く検出、マイナスで影やゴミを抑制）
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 2
+            enabled: viewModel ? viewModel.autoCropEnabled : true
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label {
+                    text: viewModel && viewModel.selectedCropIndex >= 0
+                          ? ("選択枠 #" + (viewModel.selectedCropIndex + 1) + " の検出感度")
+                          : "全体の検出感度"
+                    font.bold: true
+                    color: "#374151"
+                }
+                Item { Layout.fillWidth: true }
+                Label {
+                    objectName: "detectionSensitivityValueLabel"
+                    readonly property int sensVal: Math.round(detectionSensitivitySlider.value)
+                    text: (sensVal > 0 ? "+" : "") + sensVal + (sensVal === 0 ? " (標準)" : (sensVal > 0 ? " (高感度)" : " (控えめ)"))
+                    font.bold: true
+                    color: sensVal > 0 ? "#1D4ED8" : (sensVal < 0 ? "#B45309" : "#4B5563")
+                }
+            }
+
+            Slider {
+                id: detectionSensitivitySlider
+                objectName: "detectionSensitivitySlider"
+                Layout.fillWidth: true
+                from: -5
+                to: 5
+                stepSize: 1
+                snapMode: Slider.SnapAlways
+                value: viewModel ? viewModel.selectedCropSensitivity : 0
+                onPressedChanged: {
+                    if (!pressed && viewModel) {
+                        viewModel.selectedCropSensitivity = Math.round(value)
+                    }
+                }
+                onMoved: {
+                    if (!pressed && viewModel) {
+                        viewModel.selectedCropSensitivity = Math.round(value)
+                    }
+                }
+            }
+
+            Label {
+                text: "プラスで薄い紙の境界を広く検出、マイナスで影・ゴミを抑制"
+                font.pixelSize: 11
+                color: "#6B7280"
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+        }
+
         // 余白の一括微調整（mm: 負値で内側に削る／正値で外側に広げる）
         ColumnLayout {
             Layout.fillWidth: true

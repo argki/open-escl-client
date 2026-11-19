@@ -239,8 +239,10 @@ class AppViewModel(QObject):
         self._auto_orientation_enabled: bool = True
         self._detection_preset: DetectionPreset = "auto"
         self._resolved_detection_preset: ResolvedDetectionPreset = "receipt_multi"
+        self._detection_sensitivity: int = 0
         self._crop_margin_mm: float = 0.0
         self._crop_boxes: list[RotatedCropBox] = []
+        self._crop_sensitivities: list[int] = []
         self._crop_thumbnail_urls: dict[int, str] = {}
         self._selected_crop_index: int = -1
         self._preview_boxes_ready_for_save: bool = False
@@ -601,6 +603,39 @@ class AppViewModel(QObject):
             return f"自動採用: {short}"
         return f"手動指定: {short}"
 
+    @Property(int, notify=cropSettingsChanged)
+    def detectionSensitivity(self) -> int:
+        return self._detection_sensitivity
+
+    @detectionSensitivity.setter
+    def detectionSensitivity(self, value: int) -> None:
+        clamped = max(-5, min(5, int(round(float(value)))))
+        if self._detection_sensitivity != clamped:
+            self._detection_sensitivity = clamped
+            self.cropSettingsChanged.emit()
+            if self._auto_crop_enabled and self._preview_bgr is not None:
+                self._analyze_preview_crops()
+
+    @Property(int, notify=cropBoxesChanged)
+    def selectedCropSensitivity(self) -> int:
+        if 0 <= self._selected_crop_index < len(self._crop_sensitivities):
+            return self._crop_sensitivities[self._selected_crop_index]
+        return self._detection_sensitivity
+
+    @selectedCropSensitivity.setter
+    def selectedCropSensitivity(self, value: int) -> None:
+        clamped = max(-5, min(5, int(round(float(value)))))
+        if 0 <= self._selected_crop_index < len(self._crop_boxes):
+            cur = (
+                self._crop_sensitivities[self._selected_crop_index]
+                if self._selected_crop_index < len(self._crop_sensitivities)
+                else self._detection_sensitivity
+            )
+            if cur != clamped:
+                self._redetect_single_crop_at(self._selected_crop_index, clamped)
+            return
+        self.detectionSensitivity = clamped
+
     @Property(float, notify=cropSettingsChanged)
     def cropMarginMm(self) -> float:
         return self._crop_margin_mm
@@ -694,6 +729,7 @@ class AppViewModel(QObject):
 
     def _clear_crop_boxes(self) -> None:
         self._crop_boxes = []
+        self._crop_sensitivities = []
         self._crop_thumbnail_urls = {}
         self._selected_crop_index = -1
         self._image_provider.clear_crop_thumbnails()
@@ -748,6 +784,7 @@ class AppViewModel(QObject):
             DetectionConfig(
                 multi_document=self._multi_document_enabled,
                 detection_preset=self._detection_preset,
+                detection_sensitivity=self._detection_sensitivity,
             )
         )
         detected = detector.detect(self._preview_bgr, dpi=dpi)
@@ -785,8 +822,88 @@ class AppViewModel(QObject):
             self._crop_thumbnail_urls[refined_box.index] = url
 
         self._crop_boxes = analyzed
+        self._crop_sensitivities = [self._detection_sensitivity] * len(analyzed)
         self._selected_crop_index = 0 if analyzed else -1
         self._preview_boxes_ready_for_save = bool(analyzed)
+        self.cropBoxesChanged.emit()
+
+    def _redetect_single_crop_at(self, list_index: int, sensitivity: int) -> None:
+        """Re-run detection for only the crop box at `list_index` using `sensitivity`."""
+        if (
+            self._preview_bgr is None
+            or self._preview_session is None
+            or not (0 <= list_index < len(self._crop_boxes))
+        ):
+            return
+
+        dpi = float(self._preview_session.preview_dpi)
+        masked_bgr = self._preview_bgr.copy()
+        h, w = masked_bgr.shape[:2]
+        band = max(4, min(12, min(h, w) // 40))
+        border_samples = np.vstack(
+            [
+                masked_bgr[:band, :, :].reshape(-1, 3),
+                masked_bgr[-band:, :, :].reshape(-1, 3),
+                masked_bgr[:, :band, :].reshape(-1, 3),
+                masked_bgr[:, -band:, :].reshape(-1, 3),
+            ]
+        )
+        bg_med = np.median(border_samples, axis=0)
+        bg_color = (int(round(bg_med[0])), int(round(bg_med[1])), int(round(bg_med[2])))
+
+        for idx, other_box in enumerate(self._crop_boxes):
+            if idx == list_index:
+                continue
+            poly = np.round(other_box.corners(dpi=dpi)).astype(np.int32)
+            cv2.fillConvexPoly(masked_bgr, poly, bg_color)
+
+        detector = MultiDocumentDetector(
+            DetectionConfig(
+                multi_document=self._multi_document_enabled,
+                detection_preset=self._detection_preset,
+                detection_sensitivity=sensitivity,
+            )
+        )
+        detected = detector.detect(masked_bgr, dpi=dpi)
+
+        while len(self._crop_sensitivities) < len(self._crop_boxes):
+            self._crop_sensitivities.append(self._detection_sensitivity)
+        self._crop_sensitivities[list_index] = sensitivity
+
+        if detected:
+            target_box = self._crop_boxes[list_index]
+            best_raw = min(
+                detected,
+                key=lambda c: (
+                    (c.center_x - target_box.center_x) ** 2
+                    + (c.center_y - target_box.center_y) ** 2
+                ),
+            )
+            best_raw = replace(best_raw, index=target_box.index)
+            box_with_margin = best_raw.with_uniform_margin(self._crop_margin_mm, unit="mm")
+            cropped = self._deskew_processor.crop_box(
+                self._preview_bgr,
+                box_with_margin,
+                refine_angle=True,
+                dpi=dpi,
+            )
+            refined_box = cropped.box
+            final_img = cropped.image
+
+            if self._auto_orientation_enabled:
+                estimate = self._orientation_corrector.detect_orientation(cropped.image)
+                auto_rot = estimate.rotation_cw_deg if estimate.applied else 0
+                refined_box = refined_box.with_auto_rotation(auto_rot)
+                final_img = rotate_image_cw(cropped.image, auto_rot)
+            else:
+                refined_box = refined_box.with_auto_rotation(0)
+
+            self._crop_boxes[list_index] = refined_box
+            thumb_bytes = self._render_thumbnail_bytes(final_img)
+            url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
+            self._crop_thumbnail_urls[refined_box.index] = url
+
+        self._preview_boxes_ready_for_save = bool(self._crop_boxes)
         self.cropBoxesChanged.emit()
 
     @Slot(int)
@@ -1147,6 +1264,7 @@ class AppViewModel(QObject):
                     multi_document_enabled=self._multi_document_enabled,
                     auto_orientation_enabled=self._auto_orientation_enabled,
                     detection_preset=self._detection_preset,
+                    detection_sensitivity=self._detection_sensitivity,
                     margin_mm=self._crop_margin_mm,
                     target_dpi=float(self._selected_resolution),
                 ),

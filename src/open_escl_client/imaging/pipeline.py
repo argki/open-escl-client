@@ -41,6 +41,7 @@ class MultiCropPipelineConfig:
     multi_document_enabled: bool = True
     auto_orientation_enabled: bool = True
     detection_preset: DetectionPreset = "auto"
+    detection_sensitivity: int = 0
     margin_mm: float = 0.0
     target_dpi: float = 300.0
     output_format: Literal["PNG", "JPEG"] = "PNG"
@@ -186,6 +187,7 @@ class MultiCropScanPipeline:
             DetectionConfig(
                 multi_document=self.config.multi_document_enabled,
                 detection_preset=normalize_detection_preset(self.config.detection_preset),
+                detection_sensitivity=self.config.detection_sensitivity,
             )
         )
         detected = detector.detect(bgr, dpi=dpi)

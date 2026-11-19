@@ -693,11 +693,19 @@ def test_viewmodel_detection_preset_selection_and_a4_on_a3_auto_resolution() -> 
     root = engine.rootObjects()[0]
     crop_panel = root.findChild(QObject, "cropSettingsPanel")
     save_panel = root.findChild(QObject, "saveSettingsPanel")
-    assert crop_panel is not None and save_panel is not None
+    sens_slider = root.findChild(QObject, "detectionSensitivitySlider")
+    assert crop_panel is not None and save_panel is not None and sens_slider is not None
     assert float(crop_panel.property("width")) <= float(save_panel.property("width")) + 1.0
     for obj in engine.rootObjects():
         obj.deleteLater()
     engine.deleteLater()
+
+    # Adjusting detectionSensitivity triggers immediate re-detection with clamped [-5, +5] range.
+    vm.detectionSensitivity = 9
+    assert vm.detectionSensitivity == 5
+    assert vm.cropCount == 1
+    vm.detectionSensitivity = 0
+    assert vm.detectionSensitivity == 0
 
     # User switches to "スキャン範囲全面" in UI -> immediately recalculates to full A3 bounds.
     vm.selectedDetectionPreset = "スキャン範囲全面"
@@ -716,4 +724,68 @@ def test_viewmodel_detection_preset_selection_and_a4_on_a3_auto_resolution() -> 
     box_std = vm.cropBoxes[0]
     assert 500 <= box_std["widthPx"] <= 522
     assert 716 <= box_std["heightPx"] <= 736
+
+
+def test_viewmodel_per_crop_sensitivity_redetects_only_selected_box(tmp_path: Path) -> None:
+    """Changing `selectedCropSensitivity` re-detects only the selected crop box."""
+    # Left document has subtle white margin (251) on white platen (254); right document is distinct.
+    w, h = 1152, 800
+    img = Image.new("RGB", (w, h), (254, 254, 254))
+    arr = __import__("numpy").array(img)
+    cv2 = __import__("cv2")
+    # Left subtle sheet: x=60..420, y=100..680 with inner printed block x=140..340, y=200..560
+    cv2.rectangle(arr, (60, 100), (420, 680), (251, 251, 251), -1)
+    cv2.rectangle(arr, (140, 200), (340, 560), (45, 45, 45), -1)
+    # Right distinct sheet: x=620..1020, y=140..640
+    cv2.rectangle(arr, (620, 140), (1020, 640), (225, 232, 240), -1)
+    cv2.rectangle(arr, (680, 200), (960, 580), (50, 50, 50), -1)
+
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG", quality=98)
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        config_store=UserConfigStore(tmp_path / "config.json"),
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+
+    assert vm.cropCount == 2
+    boxes_before = list(vm.cropBoxes)
+    left_before = boxes_before[0]
+    right_before = boxes_before[1]
+
+    # Select only box #1 (index 0) and raise its sensitivity to +5.
+    vm.selectCropBox(0)
+    assert vm.selectedCropSensitivity == 0
+    vm.selectedCropSensitivity = 5
+    assert vm.selectedCropSensitivity == 5
+
+    boxes_after = list(vm.cropBoxes)
+    left_after = boxes_after[0]
+    right_after = boxes_after[1]
+
+    # Left box expanded to capture its subtle 251-luminance paper margin; right box stayed identical.
+    assert left_after["widthPx"] > left_before["widthPx"] + 40
+    assert abs(right_after["widthPx"] - right_before["widthPx"]) < 1e-3
+    assert abs(right_after["heightPx"] - right_before["heightPx"]) < 1e-3
+    assert abs(right_after["centerXNorm"] - right_before["centerXNorm"]) < 1e-4
+
+    # Switching selection to box #2 shows its own untouched sensitivity (0).
+    vm.selectCropBox(1)
+    assert vm.selectedCropSensitivity == 0
+
 

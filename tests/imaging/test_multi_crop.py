@@ -768,5 +768,156 @@ def test_single_edge_shadow_postcard_completes_opposite_side_via_standard_ratio(
     assert abs(ch - card_h) <= 10.0
 
 
+def test_a4_notice_with_footer_gap_on_a3_landscape_unifies_without_excess_bottom_padding() -> None:
+    """A4 white letter on A3 landscape unifies cleanly without postcard 1.48 bottom overshoot."""
+    # 100 DPI A3 landscape platen (1654 x 1152); A4 notice placed on the left half.
+    w, h = 1654, 1152
+    canvas = np.full((h, w, 3), (254, 254, 254), dtype=np.uint8)
+    # Subtle top glass edge shadow across scan frame y=0..1 (matches scanner platen edge).
+    cv2.line(canvas, (0, 0), (w - 1, 0), (226, 226, 226), thickness=2)
+
+    # Upper printed heading + body + light-green card graphic spanning x=[72..798], y=[30..820].
+    cv2.rectangle(canvas, (350, 30), (490, 68), (40, 40, 40), -1)
+    for row_y in range(130, 390, 44):
+        cv2.rectangle(canvas, (76, row_y), (794, row_y + 12), (45, 45, 45), -1)
+    # Shaded ID card graphic inside the A4 form
+    cv2.rectangle(canvas, (105, 415), (440, 625), (210, 226, 206), -1)
+    cv2.rectangle(canvas, (460, 415), (765, 625), (140, 140, 140), 2)
+    for row_y in range(690, 815, 42):
+        cv2.rectangle(canvas, (76, row_y), (780, row_y + 11), (45, 45, 45), -1)
+
+    # Wide blank gap (140px), then bordered footer box at y=[960..1045].
+    cv2.rectangle(canvas, (82, 960), (778, 1045), (50, 50, 50), 2)
+    cv2.rectangle(canvas, (110, 985), (680, 1020), (50, 50, 50), -1)
+
+    for dpi_val in (100.0, 0.0):
+        det = MultiDocumentDetector()
+        boxes = det.detect(canvas, dpi=dpi_val)
+        assert len(boxes) == 1
+        assert det.last_resolved_preset == "standard_sheet"
+        box = boxes[0]
+        _, by, bw, bh = box.bounding_rect()
+        ratio = bh / bw
+        # Must stay within A4 proportions (~1.414) and NOT stretch down to bottom platen 1152
+        # with postcard fallback ~1.48.
+        assert ratio <= 1.435
+        assert (by + bh) < 1130.0
+
+
+def test_upside_down_tilted_a4_notice_retains_separated_logo_code_and_title() -> None:
+    """Tilted 180° A4 sheet keeps separated thin title, logo, and code in auto & standard_sheet."""
+    # 100 DPI A3 landscape-like platen (1152 x 1654); upside-down A4 tilted ~ -5 deg.
+    w, h = 1152, 1654
+    base = np.full((h, w, 3), (254, 254, 254), dtype=np.uint8)
+
+    # Draw upright A4 content onto a centered canvas, then rotate -5.0 deg around center.
+    # Upright footer at top (y=150..235), card & body in middle (y=360..840),
+    # separated 1-line title (y=985..1004), logo (y=1065..1125), and corner code (y=1100..1115).
+    cv2.rectangle(base, (220, 155), (910, 235), (50, 50, 50), 2)
+    cv2.rectangle(base, (250, 180), (830, 212), (55, 55, 55), -1)
+
+    for row_y in range(360, 520, 48):
+        cv2.rectangle(base, (230, row_y), (895, row_y + 13), (50, 50, 50), -1)
+    cv2.rectangle(base, (240, 545), (580, 745), (210, 226, 206), -1)
+    cv2.rectangle(base, (600, 545), (890, 745), (140, 140, 140), 2)
+    for row_y in range(775, 865, 42):
+        cv2.rectangle(base, (235, row_y), (890, row_y + 13), (50, 50, 50), -1)
+
+    # Separated 1-line thin title (~125px below body)
+    cv2.rectangle(base, (430, 990), (675, 1005), (65, 65, 65), -1)
+    # Separated logo (~65px below title)
+    cv2.rectangle(base, (555, 1070), (602, 1130), (50, 50, 50), -1)
+    # Separated corner code (~95px below title, aligned on left edge)
+    cv2.rectangle(base, (245, 1105), (324, 1118), (65, 65, 65), -1)
+
+    rot_mat = cv2.getRotationMatrix2D((w * 0.5, h * 0.5), -5.0, 1.0)
+    canvas = cv2.warpAffine(
+        base,
+        rot_mat,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderValue=(254, 254, 254),
+    )
+
+    for preset in ("auto", "standard_sheet"):
+        det = MultiDocumentDetector(DetectionConfig(detection_preset=preset))
+        boxes = det.detect(canvas, dpi=100.0)
+        assert len(boxes) == 1
+        bx, by, bw, bh = boxes[0].bounding_rect()
+        ratio = max(boxes[0].width, boxes[0].height) / max(
+            1.0, min(boxes[0].width, boxes[0].height)
+        )
+        assert 1.32 <= ratio <= 1.45
+        # Must include both the top footer (~y=155) and bottom logo/code (~y=1130) after rotation.
+        assert by <= 175.0
+        assert (by + bh) >= 1115.0
+        assert bx <= 250.0
+        assert (bx + bw) >= 890.0
+
+
+def test_faint_edge_a4_sheet_expands_to_physical_paper_boundary() -> None:
+    """Faint 1-2px paper-edge shadows on tilted A4 sheet expand beyond printed margins."""
+    # 100 DPI A3 platen (1152 x 1654); A4 paper = 827 x 1169 px tilted -5 deg.
+    w, h = 1152, 1654
+    base = np.full((h, w, 3), (254, 254, 254), dtype=np.uint8)
+
+    # Physical A4 rectangle centered at (576, 827): x=[162..989], y=[242..1411]
+    px1, py1, px2, py2 = 162, 242, 989, 1411
+    # Faint paper-edge shadow (luminance ~250, only 4 gray levels below platen 254)
+    cv2.rectangle(base, (px1, py1), (px2, py2), (250, 250, 250), thickness=2)
+
+    # Printed text area sits ~18-22mm (70-85px) inside all four physical paper edges
+    for row_y in range(py1 + 85, py2 - 85, 52):
+        cv2.rectangle(base, (px1 + 78, row_y), (px2 - 78, row_y + 14), (50, 50, 50), -1)
+
+    rot_mat = cv2.getRotationMatrix2D((w * 0.5, h * 0.5), -5.0, 1.0)
+    canvas = cv2.warpAffine(
+        base,
+        rot_mat,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderValue=(254, 254, 254),
+    )
+
+    for preset in ("auto", "standard_sheet"):
+        det = MultiDocumentDetector(DetectionConfig(detection_preset=preset))
+        boxes = det.detect(canvas, dpi=100.0)
+        assert len(boxes) == 1
+        assert det.last_resolved_preset == "standard_sheet"
+        box = boxes[0]
+        short_side = min(box.width, box.height)
+        long_side = max(box.width, box.height)
+        ratio = long_side / max(1.0, short_side)
+        # Must reach physical A4 paper boundary (~827x1169), not stop near printed edges (~671x999).
+        assert short_side >= 800.0
+        assert long_side >= 1135.0
+        assert 1.38 <= ratio <= 1.44
+
+
+def test_detection_sensitivity_changes_subtle_white_sheet_boundary() -> None:
+    """Raising `detection_sensitivity` detects ultra-subtle white paper vs platen borders."""
+    # Ultra-subtle white paper (251) on white platen (254) with printed block inside.
+    # At sensitivity=0 (delta_e ~3.5 < threshold 10), color mask ignores the blank paper margin;
+    # at sensitivity=+5 (min_thresh=2.5), color mask captures the entire physical sheet directly.
+    canvas = np.full((1000, 800, 3), (254, 254, 254), dtype=np.uint8)
+    cv2.rectangle(canvas, (150, 120), (650, 820), (251, 251, 251), -1)
+    cv2.rectangle(canvas, (230, 220), (570, 680), (45, 45, 45), -1)
+
+    det_default = MultiDocumentDetector(DetectionConfig(detection_sensitivity=0))
+    boxes_default = det_default.detect(canvas, dpi=100.0)
+    assert len(boxes_default) == 1
+
+    det_high = MultiDocumentDetector(DetectionConfig(detection_sensitivity=5))
+    boxes_high = det_high.detect(canvas, dpi=100.0)
+    assert len(boxes_high) == 1
+    assert boxes_high[0].area > boxes_default[0].area * 1.3
+    assert boxes_high[0].width >= 485.0
+    assert boxes_high[0].height >= 685.0
+
+
+
+
+
+
 
 
