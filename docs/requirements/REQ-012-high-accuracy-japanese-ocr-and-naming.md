@@ -1,6 +1,6 @@
 # REQ-012: 高精度日本語 OCR の導入と OCR 結果からのファイルネーミング自動抽出
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-004`](./REQ-004-scan-save-and-continuous-workflow.md), [`REQ-005`](./REQ-005-multi-crop-and-rotation-correction.md)
@@ -47,7 +47,7 @@ feature/high-accuracy-japanese-ocr-and-naming
 
 ### タスク 1: 日本語高精度 OCR 抽象化レイヤーと macOS Vision (`ja-JP`) バックエンドの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/imaging/ocr.py` を新設し、`OcrTextBlock`（テキスト・正規化バウンディングボックス・文字高さ・信頼度）、`OcrResult`、`OcrBackend` プロトコル、`JapaneseOcrEngine` を定義する
   - macOS 向けに既存の Vision 連携設計（`orientation.py` 参照）を踏襲し、`VNRecognizeTextRequest` で `recognitionLevel=Accurate`、`recognitionLanguages=["ja-JP", "en-US"]`、`usesLanguageCorrection=True` を用いて全文と領域情報を抽出する `MacOSVisionOcrBackend` を実装する
