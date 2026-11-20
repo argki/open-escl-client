@@ -36,7 +36,7 @@ class ScanSaveProfile:
 
     @property
     def is_multipage_pdf_mode(self) -> bool:
-        return self.multipage_pdf and normalize_save_format(self.file_format) == "PDF"
+        return self.multipage_pdf and normalize_save_format(self.file_format) in ("PDF", "TIFF")
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,19 +223,21 @@ class ContinuousScanSession:
         )
 
     def finalize_multipage_pdf(self, now: datetime | None = None) -> ExportResult:
-        """Write all buffered pages into a single multi-page PDF and clear the buffer."""
+        """Write all buffered pages into a single multi-page PDF/TIFF and clear the buffer."""
         if not self._pending_pages:
             raise ValueError("結合するスキャン済みページがありません")
 
+        fmt = normalize_save_format(self._profile.file_format)
+        target_fmt = fmt if fmt in ("PDF", "TIFF") else "PDF"
         out_path, used_seq = self._naming_engine.resolve_next_path(
             self._profile.save_dir,
             self._profile.naming_template,
-            file_format="PDF",
+            file_format=target_fmt,
             start_seq=self._next_seq,
             now=now,
         )
         export_opts = ExportOptions(
-            file_format="PDF",
+            file_format=target_fmt,
             dpi=self._profile.resolution_dpi,
             quality=self._profile.quality,
         )

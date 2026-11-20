@@ -1,6 +1,6 @@
 # REQ-011: 保存ファイル形式の拡充（TIFF / WebP / BMP / GIF 等の一般画像形式対応）
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-004`](./REQ-004-scan-save-and-continuous-workflow.md)
@@ -42,7 +42,7 @@ feature/expanded-export-formats
 
 ### タスク 1: `UserConfig`・`FileNamingEngine`・`ImageExporter` の画像出力形式拡張
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/config/user_config.py` の `VALID_SAVE_FORMATS` と `normalize_save_format` を拡張し、`PDF`, `JPEG`, `PNG`, `TIFF`, `WebP`, `BMP`, `GIF`（別名 `.tif` → `TIFF` 等の正規化含む）をサポートする
   - `src/open_escl_client/core/naming.py` の `_FORMAT_TO_EXTENSION` を全形式（`.pdf`, `.jpg`, `.png`, `.tif`, `.webp`, `.bmp`, `.gif`）に対応させる

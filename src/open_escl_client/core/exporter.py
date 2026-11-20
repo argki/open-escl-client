@@ -55,9 +55,9 @@ def _to_pil_image(image_data: bytes | Image.Image) -> Image.Image:
         return transposed.copy()
 
 
-def _prepare_for_jpeg(img: Image.Image) -> Image.Image:
-    """Ensure the image mode is compatible with JPEG encoding (RGB or L)."""
-    if img.mode in ("RGB", "L"):
+def _prepare_opaque_image(img: Image.Image, *, allow_grayscale: bool = True) -> Image.Image:
+    """Flatten alpha transparency onto white paper and ensure RGB or grayscale (`L`) mode."""
+    if img.mode == "RGB" or (allow_grayscale and img.mode == "L"):
         return img
     if img.mode in ("RGBA", "LA") or "transparency" in img.info:
         background = Image.new("RGB", img.size, (255, 255, 255))
@@ -69,7 +69,7 @@ def _prepare_for_jpeg(img: Image.Image) -> Image.Image:
 
 def _encode_jpeg_bytes(img: Image.Image, dpi: int, quality: int) -> bytes:
     buf = BytesIO()
-    jpeg_img = _prepare_for_jpeg(img)
+    jpeg_img = _prepare_opaque_image(img, allow_grayscale=True)
     jpeg_img.save(
         buf,
         format="JPEG",
@@ -80,8 +80,17 @@ def _encode_jpeg_bytes(img: Image.Image, dpi: int, quality: int) -> bytes:
     return buf.getvalue()
 
 
+def _build_dpi_exif_bytes(dpi: int) -> bytes:
+    """Build minimal EXIF payload encoding X/Y DPI resolution in inches for WebP."""
+    exif = Image.Exif()
+    exif[0x011A] = float(dpi)
+    exif[0x011B] = float(dpi)
+    exif[0x0128] = 2  # inches
+    return exif.tobytes()
+
+
 class ImageExporter:
-    """Exports single or multi-page scanned images to JPEG, PNG, or PDF with DPI & quality control."""
+    """Exports single or multi-page scanned images across PDF and raster formats."""
 
     def export_single(
         self,
@@ -98,7 +107,7 @@ class ImageExporter:
         output_path: Path | str,
         options: ExportOptions | None = None,
     ) -> ExportResult:
-        """Export one or more scanned pages to `output_path` (multi-page supported for PDF)."""
+        """Export one or more scanned pages to `output_path` (multi-page supported for PDF/TIFF)."""
         if not pages:
             raise ValueError("保存するページ画像が空です")
 
@@ -112,8 +121,7 @@ class ImageExporter:
 
         if fmt == "JPEG":
             img = _to_pil_image(pages[0])
-            jpeg_bytes = _encode_jpeg_bytes(img, dpi=dpi, quality=quality)
-            target_path.write_bytes(jpeg_bytes)
+            target_path.write_bytes(_encode_jpeg_bytes(img, dpi=dpi, quality=quality))
             page_count = 1
         elif fmt == "PNG":
             img = _to_pil_image(pages[0])
@@ -127,6 +135,47 @@ class ImageExporter:
                 compress_level=compress_level,
                 optimize=True,
             )
+            target_path.write_bytes(buf.getvalue())
+            page_count = 1
+        elif fmt == "TIFF":
+            pil_pages = [
+                _prepare_opaque_image(_to_pil_image(page), allow_grayscale=True)
+                for page in pages
+            ]
+            buf = BytesIO()
+            save_kwargs: dict[str, object] = {
+                "format": "TIFF",
+                "compression": "tiff_lzw",
+                "dpi": (float(dpi), float(dpi)),
+            }
+            if len(pil_pages) > 1:
+                save_kwargs["save_all"] = True
+                save_kwargs["append_images"] = pil_pages[1:]
+            pil_pages[0].save(buf, **save_kwargs)
+            target_path.write_bytes(buf.getvalue())
+            page_count = len(pil_pages)
+        elif fmt == "WebP":
+            img = _prepare_opaque_image(_to_pil_image(pages[0]), allow_grayscale=False)
+            buf = BytesIO()
+            img.save(
+                buf,
+                format="WEBP",
+                quality=quality,
+                exif=_build_dpi_exif_bytes(dpi),
+            )
+            target_path.write_bytes(buf.getvalue())
+            page_count = 1
+        elif fmt == "BMP":
+            img = _prepare_opaque_image(_to_pil_image(pages[0]), allow_grayscale=True)
+            buf = BytesIO()
+            img.save(buf, format="BMP", dpi=(dpi, dpi))
+            target_path.write_bytes(buf.getvalue())
+            page_count = 1
+        elif fmt == "GIF":
+            rgb = _prepare_opaque_image(_to_pil_image(pages[0]), allow_grayscale=False)
+            palette_img = rgb.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
+            buf = BytesIO()
+            palette_img.save(buf, format="GIF")
             target_path.write_bytes(buf.getvalue())
             page_count = 1
         elif fmt == "PDF":

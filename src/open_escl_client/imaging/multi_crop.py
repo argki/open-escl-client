@@ -154,17 +154,43 @@ def decode_image_bytes(image_bytes: bytes) -> np.ndarray:
 def encode_image_bytes(
     image: np.ndarray,
     *,
-    fmt: Literal["PNG", "JPEG"] = "PNG",
+    fmt: str = "PNG",
     quality: int = 92,
 ) -> bytes:
-    """Encode an OpenCV BGR/Gray ndarray into PNG or JPEG bytes."""
-    normalized_fmt = fmt.upper()
+    """Encode an OpenCV BGR/Gray ndarray into PNG, JPEG, TIFF, WebP, BMP, or GIF bytes."""
+    normalized_fmt = fmt.strip().lstrip(".").upper()
+    if normalized_fmt == "JPG":
+        normalized_fmt = "JPEG"
+    elif normalized_fmt == "TIF":
+        normalized_fmt = "TIFF"
+
+    clamped_q = max(1, min(100, int(quality)))
     if normalized_fmt == "JPEG":
         ext = ".jpg"
-        params = [int(cv2.IMWRITE_JPEG_QUALITY), max(1, min(100, int(quality)))]
+        params = [int(cv2.IMWRITE_JPEG_QUALITY), clamped_q]
     elif normalized_fmt == "PNG":
         ext = ".png"
         params = [int(cv2.IMWRITE_PNG_COMPRESSION), 3]
+    elif normalized_fmt in ("TIFF", "WEBP", "BMP", "GIF"):
+        from io import BytesIO
+
+        from PIL import Image
+
+        bgr = _ensure_bgr(image)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb, mode="RGB")
+        buf = BytesIO()
+        if normalized_fmt == "TIFF":
+            pil_img.save(buf, format="TIFF", compression="tiff_lzw")
+        elif normalized_fmt == "WEBP":
+            pil_img.save(buf, format="WEBP", quality=clamped_q)
+        elif normalized_fmt == "BMP":
+            pil_img.save(buf, format="BMP")
+        else:
+            pil_img.convert("P", palette=Image.Palette.ADAPTIVE, colors=256).save(
+                buf, format="GIF"
+            )
+        return buf.getvalue()
     else:
         raise ValueError(f"Unsupported image format: {fmt}")
 

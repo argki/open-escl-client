@@ -108,3 +108,30 @@ def test_resolve_next_path_without_seq_token_appends_suffix_on_collision(tmp_pat
     )
     assert p2 == tmp_path / "Contract_20261118_001.pdf"
     assert seq2 == 1
+
+
+def test_expanded_export_format_extensions_and_filenames() -> None:
+    engine = FileNamingEngine()
+
+    assert normalize_extension("TIFF") == ".tif"
+    assert normalize_extension(".tif") == ".tif"
+    assert normalize_extension("WebP") == ".webp"
+    assert normalize_extension("BMP") == ".bmp"
+    assert normalize_extension("GIF") == ".gif"
+
+    assert (
+        engine.render_filename("Doc_{seq:03d}", seq=1, file_format="TIFF", now=FIXED_NOW)
+        == "Doc_001.tif"
+    )
+    assert (
+        engine.render_filename("Doc_{seq:03d}", seq=2, file_format="WebP", now=FIXED_NOW)
+        == "Doc_002.webp"
+    )
+    assert (
+        engine.render_filename("Doc_{seq:03d}", seq=3, file_format="BMP", now=FIXED_NOW)
+        == "Doc_003.bmp"
+    )
+    assert (
+        engine.render_filename("Doc_{seq:03d}", seq=4, file_format="GIF", now=FIXED_NOW)
+        == "Doc_004.gif"
+    )
