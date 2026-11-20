@@ -915,6 +915,32 @@ def test_detection_sensitivity_changes_subtle_white_sheet_boundary() -> None:
     assert boxes_high[0].height >= 685.0
 
 
+def test_explicit_aspect_ratio_preset_controls_paper_completion() -> None:
+    """Explicit `aspect_ratio_preset` selects target ratio or disables completion (`free`)."""
+    # White sheet with crisp top shadow only (width=580px, printed height ~310px).
+    canvas = np.full((1100, 960, 3), (254, 254, 254), dtype=np.uint8)
+    x0, y0, card_w = 190, 220, 580
+    cv2.line(canvas, (x0, y0), (x0 + card_w, y0), (205, 205, 205), thickness=2)
+    for row_y in range(250, 520, 36):
+        cv2.rectangle(canvas, (x0 + 28, row_y), (x0 + card_w - 30, row_y + 10), (40, 40, 40), -1)
+
+    det_free = MultiDocumentDetector(DetectionConfig(aspect_ratio_preset="free"))
+    box_free = det_free.detect(canvas, dpi=0.0)[0]
+    assert box_free.height < 350.0
+
+    det_iso = MultiDocumentDetector(DetectionConfig(aspect_ratio_preset="iso_a_b"))
+    box_iso = det_iso.detect(canvas, dpi=0.0)[0]
+    ratio_iso = max(box_iso.width, box_iso.height) / min(box_iso.width, box_iso.height)
+    assert abs(ratio_iso - math.sqrt(2.0)) <= 0.04
+
+    det_postcard = MultiDocumentDetector(DetectionConfig(aspect_ratio_preset="postcard"))
+    box_post = det_postcard.detect(canvas, dpi=0.0)[0]
+    ratio_post = max(box_post.width, box_post.height) / min(box_post.width, box_post.height)
+    assert abs(ratio_post - 1.480) <= 0.04
+    assert box_iso.height > box_post.height + 10.0
+
+
+
 
 
 

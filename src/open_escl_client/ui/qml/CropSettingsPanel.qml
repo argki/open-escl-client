@@ -152,6 +152,40 @@ GroupBox {
             }
         }
 
+        // 検出比率（規格：自動判別 / A判・B判(白銀比) / はがき / L判写真 等）
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+            enabled: viewModel ? viewModel.autoCropEnabled : true
+
+            Label {
+                text: viewModel && viewModel.selectedCropIndex >= 0
+                      ? ("選択枠 #" + (viewModel.selectedCropIndex + 1) + " の検出比率（規格）")
+                      : "全体の検出比率（規格）"
+                font.bold: true
+                color: "#374151"
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+            }
+
+            ComboBox {
+                id: aspectRatioPresetComboBox
+                objectName: "aspectRatioPresetComboBox"
+                Layout.fillWidth: true
+                model: viewModel ? viewModel.aspectRatioPresets : []
+                currentIndex: {
+                    if (!viewModel || !model) return 0
+                    var idx = model.indexOf(viewModel.selectedCropAspectRatioPreset)
+                    return idx >= 0 ? idx : 0
+                }
+                onActivated: function(index) {
+                    if (viewModel && model[index]) {
+                        viewModel.selectedCropAspectRatioPreset = model[index]
+                    }
+                }
+            }
+        }
+
         // 余白の一括微調整（mm: 負値で内側に削る／正値で外側に広げる）
         ColumnLayout {
             Layout.fillWidth: true

@@ -19,6 +19,16 @@ import numpy as np
 BackgroundMode = Literal["auto", "light", "dark"]
 DetectionPreset = Literal["auto", "receipt_multi", "standard_sheet", "full_page"]
 ResolvedDetectionPreset = Literal["receipt_multi", "standard_sheet", "full_page"]
+AspectRatioPreset = Literal[
+    "auto",
+    "iso_a_b",
+    "postcard",
+    "l_photo",
+    "kg_photo",
+    "2l_photo",
+    "business_card",
+    "free",
+]
 RotationDeg = Literal[0, 90, 180, 270]
 MarginUnit = Literal["mm", "px"]
 EdgeName = Literal["top", "right", "bottom", "left"]
@@ -29,6 +39,26 @@ VALID_DETECTION_PRESETS: tuple[DetectionPreset, ...] = (
     "standard_sheet",
     "full_page",
 )
+
+VALID_ASPECT_RATIO_PRESETS: tuple[AspectRatioPreset, ...] = (
+    "auto",
+    "iso_a_b",
+    "postcard",
+    "l_photo",
+    "kg_photo",
+    "2l_photo",
+    "business_card",
+    "free",
+)
+
+ASPECT_RATIO_PRESET_RATIOS: dict[AspectRatioPreset, float] = {
+    "iso_a_b": math.sqrt(2.0),
+    "postcard": 148.0 / 100.0,
+    "l_photo": 127.0 / 89.0,
+    "kg_photo": 152.0 / 102.0,
+    "2l_photo": 178.0 / 127.0,
+    "business_card": 91.0 / 55.0,
+}
 
 MM_PER_INCH = 25.4
 MIN_CROP_SIDE_PX = 4.0
@@ -58,6 +88,14 @@ def normalize_detection_preset(preset: str) -> DetectionPreset:
         return "standard_sheet"
     if cleaned == "full_page":
         return "full_page"
+    return "auto"
+
+
+def normalize_aspect_ratio_preset(preset: str) -> AspectRatioPreset:
+    """Normalize an aspect-ratio preset string into a valid `AspectRatioPreset` literal."""
+    cleaned = str(preset).strip().lower()
+    if cleaned in VALID_ASPECT_RATIO_PRESETS:
+        return cleaned  # type: ignore[return-value]
     return "auto"
 
 
@@ -738,6 +776,7 @@ class DetectionConfig:
     printed_border_ink_drop_l: float = 40.0
     merge_same_sheet_fragments: bool = True
     aspect_ratio_completion: bool = True
+    aspect_ratio_preset: AspectRatioPreset = "auto"
     detection_sensitivity: int = 0
 
 
@@ -1512,6 +1551,8 @@ class MultiDocumentDetector:
                     continue
                 out_raw_subblocks.append(rg)
 
+        ratio_preset = normalize_aspect_ratio_preset(self.config.aspect_ratio_preset)
+        use_ratio_completion = self.config.aspect_ratio_completion and ratio_preset != "free"
         expanded_groups: list[tuple[RotatedCropBox, RotatedCropBox]] = []
         for raw_group in raw_groups:
             expanded = self._expand_printed_group_to_paper_edges(
@@ -1520,7 +1561,8 @@ class MultiDocumentDetector:
                 solid_boxes=solid_boxes,
                 dpi=dpi,
                 scale=scale,
-                aspect_ratio_completion=self.config.aspect_ratio_completion,
+                aspect_ratio_completion=use_ratio_completion,
+                aspect_ratio_preset=ratio_preset,
             )
             expanded_groups.append((raw_group, expanded))
 
@@ -1652,6 +1694,7 @@ class MultiDocumentDetector:
         dpi: float = 0.0,
         scale: float = 1.0,
         aspect_ratio_completion: bool = True,
+        aspect_ratio_preset: AspectRatioPreset = "auto",
     ) -> RotatedCropBox:
         """Snap a printed-fragment box outward to faint paper edges and trace shadow lines."""
         h, w = work_gray.shape[:2]
@@ -2069,7 +2112,7 @@ class MultiDocumentDetector:
         # When a standard white document (e.g. a 100x148mm postcard) casts crisp shadows only on
         # one or two sides, the unanchored side stops near the edge of the ink. Anchor the
         # confident axis and extend unanchored edge(s) outward to the matched standard paper ratio.
-        if aspect_ratio_completion:
+        if aspect_ratio_completion and aspect_ratio_preset != "free":
             eff_dpi = float(dpi) * float(scale) if dpi > 0.0 and scale > 0.0 else 0.0
             work_area = float(h * w)
             pad_t, pad_r, pad_b, pad_l = cls._complete_margins_by_standard_ratio(
@@ -2089,6 +2132,7 @@ class MultiDocumentDetector:
                 effective_dpi=eff_dpi,
                 work_area=work_area,
                 local_point_valid=local_point_valid,
+                aspect_ratio_preset=aspect_ratio_preset,
             )
 
         # Clamp final paddings to stay strictly within source image boundaries.
@@ -2174,10 +2218,16 @@ class MultiDocumentDetector:
         anchor_is_long: bool,
         effective_dpi: float,
         box_area_ratio: float = 0.0,
+        aspect_ratio_preset: AspectRatioPreset = "auto",
     ) -> float | None:
         """Select a target `long / short` aspect ratio when `other_px` appears under-detected."""
         if anchor_px <= 0.0 or other_px <= 0.0:
             return None
+        if aspect_ratio_preset == "free":
+            return None
+        explicit_ratio = ASPECT_RATIO_PRESET_RATIOS.get(aspect_ratio_preset)
+        if explicit_ratio is not None:
+            return explicit_ratio
         cur_ratio = (anchor_px / other_px) if anchor_is_long else (other_px / anchor_px)
         # Do not force elongated receipts/slips (ratio > 1.92) or near-square items (< 1.10).
         if cur_ratio > 1.92 or cur_ratio < 1.10:
@@ -2233,8 +2283,11 @@ class MultiDocumentDetector:
         effective_dpi: float,
         work_area: float,
         local_point_valid: Callable[[float, float], bool],
+        aspect_ratio_preset: AspectRatioPreset = "auto",
     ) -> tuple[float, float, float, float]:
         """Extend unanchored edge(s) outward to match standard paper proportions."""
+        if aspect_ratio_preset == "free":
+            return pad_t, pad_r, pad_b, pad_l
         lx1 = int(round(x1 - pad_l))
         lx2 = int(round(x2 + pad_r))
         ly1 = int(round(y1 - pad_t))
@@ -2246,14 +2299,16 @@ class MultiDocumentDetector:
 
         cov_t, cov_r, cov_b, cov_l = cls._measure_patch_edge_coverage(patch, lx1, ly1, lx2, ly2)
 
-        # Skip when all 4 edges (or 3+ edges of a high-rectangularity bordered card) are solid.
-        if min(cov_t, cov_b) >= 0.45 and min(cov_l, cov_r) >= 0.45:
-            return pad_t, pad_r, pad_b, pad_l
-        if (
-            box_confidence >= 0.90
-            and sum(1 for c in (cov_t, cov_r, cov_b, cov_l) if c >= 0.65) >= 3
-        ):
-            return pad_t, pad_r, pad_b, pad_l
+        explicit_ratio = ASPECT_RATIO_PRESET_RATIOS.get(aspect_ratio_preset)
+        if explicit_ratio is None:
+            # Skip when all 4 edges (or 3+ edges of a high-rectangularity bordered card) are solid.
+            if min(cov_t, cov_b) >= 0.45 and min(cov_l, cov_r) >= 0.45:
+                return pad_t, pad_r, pad_b, pad_l
+            if (
+                box_confidence >= 0.90
+                and sum(1 for c in (cov_t, cov_r, cov_b, cov_l) if c >= 0.65) >= 3
+            ):
+                return pad_t, pad_r, pad_b, pad_l
 
         w_anchored = (cov_l >= 0.45 and cov_r >= 0.45) or (
             max(cov_t, cov_b) >= 0.65 and horiz_supported
@@ -2270,6 +2325,14 @@ class MultiDocumentDetector:
         if expand_vertical is None and h_anchored and min(cov_l, cov_r) < 0.35:
             if not w_anchored or cur_h > cur_w:
                 expand_vertical = False
+        if expand_vertical is None and explicit_ratio is not None:
+            cur_long_short = max(cur_w, cur_h) / max(1.0, min(cur_w, cur_h))
+            if cur_long_short < explicit_ratio - 0.015:
+                # Needs longer long-axis -> expand along the currently longer axis.
+                expand_vertical = cur_h >= cur_w
+            elif cur_long_short > explicit_ratio + 0.015:
+                # Needs wider short-axis -> expand along the currently shorter axis.
+                expand_vertical = cur_h < cur_w
         if expand_vertical is None:
             return pad_t, pad_r, pad_b, pad_l
 
@@ -2282,7 +2345,11 @@ class MultiDocumentDetector:
             other_px = cur_w
             cov_neg, cov_pos = cov_l, cov_r
 
-        anchor_is_long = anchor_px >= other_px
+        anchor_is_long = (
+            (anchor_px >= other_px)
+            if explicit_ratio is None
+            else ((cur_w >= cur_h) if expand_vertical else (cur_h >= cur_w))
+        )
         box_area_ratio = (cur_w * cur_h) / work_area if work_area > 0.0 else 0.0
         target_ratio = cls._pick_standard_target_aspect_ratio(
             anchor_px,
@@ -2290,13 +2357,15 @@ class MultiDocumentDetector:
             anchor_is_long=anchor_is_long,
             effective_dpi=effective_dpi,
             box_area_ratio=box_area_ratio,
+            aspect_ratio_preset=aspect_ratio_preset,
         )
         if target_ratio is None:
             return pad_t, pad_r, pad_b, pad_l
 
         target_other = (anchor_px / target_ratio) if anchor_is_long else (anchor_px * target_ratio)
         deficit = target_other - other_px
-        if deficit <= 1.0 or deficit > other_px * 0.28:
+        max_deficit_ratio = 0.45 if explicit_ratio is not None else 0.28
+        if deficit <= 1.0 or deficit > other_px * max_deficit_ratio:
             return pad_t, pad_r, pad_b, pad_l
 
         # Keep anchored side(s) fixed and allocate missing expansion onto unanchored side(s).
@@ -2304,7 +2373,7 @@ class MultiDocumentDetector:
             neg_req, pos_req = 0.0, deficit
         elif cov_pos >= 0.45 and cov_neg < 0.35:
             neg_req, pos_req = deficit, 0.0
-        elif cov_neg < 0.35 and cov_pos < 0.35:
+        elif explicit_ratio is not None or (cov_neg < 0.35 and cov_pos < 0.35):
             neg_req, pos_req = deficit * 0.5, deficit * 0.5
         else:
             return pad_t, pad_r, pad_b, pad_l
@@ -2828,6 +2897,8 @@ class MultiDocumentDetector:
 
         results: list[RotatedCropBox] = []
         sensitivity = self._clamped_sensitivity()
+        ratio_preset = normalize_aspect_ratio_preset(self.config.aspect_ratio_preset)
+        explicit_ratio = ASPECT_RATIO_PRESET_RATIOS.get(ratio_preset)
         for raw_wb, fallback_exp_wb in target_pairs:
             off_t, off_r, off_b, off_l = self._detect_standard_sheet_edge_offsets(
                 work_gray, raw_wb, solid_boxes=solid_work_boxes, sensitivity=sensitivity
@@ -2857,7 +2928,7 @@ class MultiDocumentDetector:
             # unanchored sides because paper-to-platen contrast is too faint, pad missing sides
             # outward toward A4 dimensions.
             a4_completed = False
-            if dpi > 0.0 and scale > 0.0:
+            if ratio_preset in ("auto", "iso_a_b") and dpi > 0.0 and scale > 0.0:
                 px_per_mm = (float(dpi) * float(scale)) / 25.4
                 raw_short_mm = min(raw_wb.width, raw_wb.height) / px_per_mm
                 raw_long_mm = max(raw_wb.width, raw_wb.height) / px_per_mm
@@ -2890,6 +2961,55 @@ class MultiDocumentDetector:
                         else:
                             pad_b = min(max_pad_px, pad_b + deficit_h)
                         a4_completed = True
+
+            if explicit_ratio is not None:
+                cur_w = raw_wb.width + pad_l + pad_r
+                cur_h = raw_wb.height + pad_t + pad_b
+                if cur_w > 0.0 and cur_h > 0.0:
+                    cur_ratio = max(cur_w, cur_h) / min(cur_w, cur_h)
+                    long_is_h = cur_h >= cur_w
+                    if cur_ratio < explicit_ratio - 0.015:
+                        target_long = min(cur_w, cur_h) * explicit_ratio
+                        deficit = target_long - max(cur_w, cur_h)
+                        if 1.0 < deficit <= max(cur_w, cur_h) * 0.45:
+                            if long_is_h:
+                                if off_t is None and off_b is not None:
+                                    pad_t += deficit
+                                elif off_b is None and off_t is not None:
+                                    pad_b += deficit
+                                else:
+                                    pad_t += deficit * 0.5
+                                    pad_b += deficit * 0.5
+                            else:
+                                if off_l is None and off_r is not None:
+                                    pad_l += deficit
+                                elif off_r is None and off_l is not None:
+                                    pad_r += deficit
+                                else:
+                                    pad_l += deficit * 0.5
+                                    pad_r += deficit * 0.5
+                            a4_completed = True
+                    elif cur_ratio > explicit_ratio + 0.015:
+                        target_short = max(cur_w, cur_h) / explicit_ratio
+                        deficit = target_short - min(cur_w, cur_h)
+                        if 1.0 < deficit <= min(cur_w, cur_h) * 0.45:
+                            if long_is_h:
+                                if off_l is None and off_r is not None:
+                                    pad_l += deficit
+                                elif off_r is None and off_l is not None:
+                                    pad_r += deficit
+                                else:
+                                    pad_l += deficit * 0.5
+                                    pad_r += deficit * 0.5
+                            else:
+                                if off_t is None and off_b is not None:
+                                    pad_t += deficit
+                                elif off_b is None and off_t is not None:
+                                    pad_b += deficit
+                                else:
+                                    pad_t += deficit * 0.5
+                                    pad_b += deficit * 0.5
+                            a4_completed = True
 
             if all(off is None for off in (off_t, off_r, off_b, off_l)) and not a4_completed:
                 chosen_wb = fallback_exp_wb
