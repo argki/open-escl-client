@@ -1,6 +1,6 @@
 # REQ-012: 高精度日本語 OCR の導入と OCR 結果からのファイルネーミング自動抽出
 
-- **ステータス**: `未着手`
+- **ステータス**: `完了`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-004`](./REQ-004-scan-save-and-continuous-workflow.md), [`REQ-005`](./REQ-005-multi-crop-and-rotation-correction.md)
@@ -28,10 +28,10 @@
 
 ## 3. 完了条件（Acceptance Criteria）
 
-- [ ] Brother × macOS 環境で日本語文書（通知書・領収書・レシート等）をスキャンした際、高精度日本語 OCR によりテキストとレイアウト位置が正しく認識されること
-- [ ] OCR テキストから文書タイトルや日付を自動抽出し、ネーミングルールの `{ocr_title}` / `{ocr_date}` 展開やファイル名候補提案として利用できること
-- [ ] Windows 環境向けの拡張を阻害しない OS 抽象化（バックエンド分離・モックテスト可能）になっていること
-- [ ] OCR 無効時やテキスト未検出時は安全なフォールバック値となり保存が失敗しないこと
+- [x] Brother × macOS 環境で日本語文書（通知書・領収書・レシート等）をスキャンした際、高精度日本語 OCR によりテキストとレイアウト位置が正しく認識されること
+- [x] OCR テキストから文書タイトルや日付を自動抽出し、ネーミングルールの `{ocr_title}` / `{ocr_date}` 展開やファイル名候補提案として利用できること
+- [x] Windows 環境向けの拡張を阻害しない OS 抽象化（バックエンド分離・モックテスト可能）になっていること
+- [x] OCR 無効時やテキスト未検出時は安全なフォールバック値となり保存が失敗しないこと
 
 ---
 
@@ -47,7 +47,7 @@ feature/high-accuracy-japanese-ocr-and-naming
 
 ### タスク 1: 日本語高精度 OCR 抽象化レイヤーと macOS Vision (`ja-JP`) バックエンドの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/imaging/ocr.py` を新設し、`OcrTextBlock`（テキスト・正規化バウンディングボックス・文字高さ・信頼度）、`OcrResult`、`OcrBackend` プロトコル、`JapaneseOcrEngine` を定義する
   - macOS 向けに既存の Vision 連携設計（`orientation.py` 参照）を踏襲し、`VNRecognizeTextRequest` で `recognitionLevel=Accurate`、`recognitionLanguages=["ja-JP", "en-US"]`、`usesLanguageCorrection=True` を用いて全文と領域情報を抽出する `MacOSVisionOcrBackend` を実装する
@@ -75,7 +75,7 @@ feat(imaging): 日本語高精度OCRエンジン抽象化レイヤーとmacOS Vi
 
 ### タスク 2: OCR 結果からの文書タイトル・日付抽出ロジックと `FileNamingEngine` トークン拡張
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/core/ocr_naming.py` を追加し、`OcrResult` の行テキスト・文字高さ・位置・日付パターン（和暦 `令和X年Y月Z日` / 西暦 `YYYY年M月D日` / `YYYY/MM/DD` 等）から `ocr_title`（見出し・主要帳票キーワード）と `ocr_date`（`YYYYMMDD`）を抽出し、ファイル名禁止文字をサニタイズする `OcrNamingExtractor` を実装する
   - `src/open_escl_client/core/naming.py` の `FileNamingEngine` を拡張し、`{ocr_title}` や `{ocr_date}` トークン（未抽出時はフォールバックで空文字整理や既定値にフォールバックし二重アンダースコア `__` 等を整形）を展開できるようにする
@@ -101,7 +101,7 @@ OCRで認識した日本語テキストからファイル名に有用な見出�
 
 ### タスク 3: 保存パイプライン連携および QML UI での OCR 抽出候補提案機能の実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/imaging/pipeline.py`（および `AppViewModel`）に OCR ネーミング抽出の ON/OFF 設定とプレビュー時／保存時の非同期・自動抽出処理を組み込む
   - プレビュー完了時（各切り出し枠に対して）または保存設定パネルの「OCR でファイル名候補を提案」アクションにより、抽出されたタイトル・日付をプレビューや `次のファイル名` へ即時反映し、必要に応じてユーザーが上書き編集できるようにする

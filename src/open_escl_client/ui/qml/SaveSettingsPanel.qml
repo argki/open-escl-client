@@ -145,6 +145,122 @@ GroupBox {
             }
         }
 
+        CheckBox {
+            id: ocrNamingCheckBox
+            objectName: "ocrNamingCheckBox"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            text: "OCRでタイトル・日付をファイル名に使う"
+            checked: viewModel ? viewModel.ocrNamingEnabled : false
+            onToggled: {
+                if (viewModel) {
+                    viewModel.ocrNamingEnabled = checked
+                }
+            }
+        }
+
+        ColumnLayout {
+            id: ocrNamingDetailsBox
+            objectName: "ocrNamingDetailsBox"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            spacing: 6
+            visible: viewModel ? viewModel.ocrNamingEnabled : false
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                spacing: 4
+
+                Button {
+                    id: insertOcrTitleTokenButton
+                    objectName: "insertOcrTitleTokenButton"
+                    text: "+タイトル"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    onClicked: {
+                        if (viewModel) {
+                            viewModel.insertNamingToken("{ocr_title}")
+                        }
+                    }
+                }
+
+                Button {
+                    id: insertOcrDateTokenButton
+                    objectName: "insertOcrDateTokenButton"
+                    text: "+日付"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    onClicked: {
+                        if (viewModel) {
+                            viewModel.insertNamingToken("{ocr_date}")
+                        }
+                    }
+                }
+
+                Button {
+                    id: applyOcrPresetButton
+                    objectName: "applyOcrPresetButton"
+                    text: "OCR標準"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    onClicked: {
+                        if (viewModel) {
+                            viewModel.applyOcrNamingPreset()
+                        }
+                    }
+                }
+            }
+
+            Button {
+                id: extractOcrNamingButton
+                objectName: "extractOcrNamingButton"
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                enabled: viewModel ? (viewModel.hasPreview && !viewModel.ocrBusy && !viewModel.isBusy) : false
+                text: (viewModel && viewModel.ocrBusy) ? "OCR解析中..." : "プレビューから候補を抽出"
+                onClicked: {
+                    if (viewModel) {
+                        viewModel.extractOcrNamingFromPreview()
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                spacing: 6
+
+                TextField {
+                    id: ocrTitleField
+                    objectName: "ocrTitleField"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    placeholderText: "タイトル候補"
+                    text: viewModel ? viewModel.ocrTitle : ""
+                    onTextEdited: {
+                        if (viewModel) {
+                            viewModel.ocrTitle = text
+                        }
+                    }
+                }
+
+                TextField {
+                    id: ocrDateField
+                    objectName: "ocrDateField"
+                    Layout.preferredWidth: 96
+                    Layout.minimumWidth: 0
+                    placeholderText: "YYYYMMDD"
+                    text: viewModel ? viewModel.ocrDate : ""
+                    onTextEdited: {
+                        if (viewModel) {
+                            viewModel.ocrDate = text
+                        }
+                    }
+                }
+            }
+        }
+
         // --------------------------------------------------------------------
         // 保存ファイル形式
         // --------------------------------------------------------------------

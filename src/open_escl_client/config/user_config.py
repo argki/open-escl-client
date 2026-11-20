@@ -111,6 +111,7 @@ class UserConfig:
     bleed_through_enabled: bool = True
     bleed_through_strength: float = 0.6
     bleed_through_whiten_background: bool = True
+    ocr_naming_enabled: bool = False
     expanded_sidebar_sections: dict[str, bool] = field(default_factory=dict)
 
     def resolved_save_directory(self) -> Path:
@@ -169,6 +170,7 @@ class UserConfig:
         bleed_through_whiten_background = bool(
             data.get("bleed_through_whiten_background", True)
         )
+        ocr_naming_enabled = bool(data.get("ocr_naming_enabled", False))
         raw_sections = data.get("expanded_sidebar_sections")
         expanded_sidebar_sections = (
             {str(k): bool(v) for k, v in raw_sections.items()}
@@ -198,6 +200,7 @@ class UserConfig:
             bleed_through_enabled=bleed_through_enabled,
             bleed_through_strength=bleed_through_strength,
             bleed_through_whiten_background=bleed_through_whiten_background,
+            ocr_naming_enabled=ocr_naming_enabled,
             expanded_sidebar_sections=expanded_sidebar_sections,
         )
 

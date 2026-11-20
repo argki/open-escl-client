@@ -445,3 +445,61 @@ def test_pipeline_applies_bleed_through_removal_to_saved_documents() -> None:
     assert float(np.mean(docs_on[0].image[85:105, 60:340])) >= 232.0
     assert float(np.mean(docs_on[0].image[225:245, 60:340])) < 45.0
 
+
+def test_pipeline_attaches_ocr_naming_metadata_when_enabled() -> None:
+    """`MultiCropScanPipeline` extracts OCR naming metadata per processed document."""
+    from open_escl_client.imaging.ocr import (
+        JapaneseOcrEngine,
+        OcrBoundingBox,
+        OcrConfig,
+        OcrResult,
+        OcrTextBlock,
+    )
+
+    class _StubOcrBackend:
+        @property
+        def name(self) -> str:
+            return "stub_ocr"
+
+        def is_available(self) -> bool:
+            return True
+
+        def recognize(self, image: np.ndarray, config: OcrConfig) -> OcrResult:
+            h, w = image.shape[:2]
+            blocks = (
+                OcrTextBlock(
+                    text="御見積書",
+                    bbox=OcrBoundingBox(0.1, 0.08, 0.4, 0.06),
+                    confidence=0.97,
+                ),
+                OcrTextBlock(
+                    text="作成日: 令和6年11月20日",
+                    bbox=OcrBoundingBox(0.1, 0.18, 0.5, 0.03),
+                    confidence=0.94,
+                ),
+            )
+            return OcrResult(
+                blocks=blocks,
+                full_text="御見積書\n作成日: 令和6年11月20日",
+                backend_name=self.name,
+                image_width=w,
+                image_height=h,
+                applied=True,
+            )
+
+    img = np.full((400, 300, 3), 245, dtype=np.uint8)
+    pipeline = MultiCropScanPipeline(
+        MultiCropPipelineConfig(
+            auto_crop_enabled=False,
+            auto_orientation_enabled=False,
+            ocr_naming_enabled=True,
+        ),
+        ocr_engine=JapaneseOcrEngine(backends=[_StubOcrBackend()]),
+    )
+    docs = pipeline.process_documents(img)
+    assert len(docs) == 1
+    meta = docs[0].ocr_metadata
+    assert meta is not None
+    assert meta.ocr_title == "御見積書"
+    assert meta.ocr_date == "20241120"
+

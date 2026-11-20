@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -31,10 +31,14 @@ from open_escl_client.imaging.multi_crop import (
     normalize_detection_preset,
     scale_crop_boxes,
 )
+from open_escl_client.imaging.ocr import JapaneseOcrEngine
 from open_escl_client.imaging.orientation import (
     AutoOrientationCorrector,
     rotate_image_cw,
 )
+
+if TYPE_CHECKING:
+    from open_escl_client.core.ocr_naming import OcrNamingExtractor, OcrNamingMetadata
 
 PostProcessor = Callable[[bytes], list[bytes]]
 
@@ -54,6 +58,7 @@ class MultiCropPipelineConfig:
     output_format: Literal["PNG", "JPEG", "TIFF", "WebP", "BMP", "GIF"] = "PNG"
     output_quality: int = 95
     bleed_through: BleedThroughConfig = field(default_factory=BleedThroughConfig)
+    ocr_naming_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +70,7 @@ class ProcessedDocument:
     rotation_cw_deg: RotationDeg
     orientation_source: str
     encoded_bytes: bytes
+    ocr_metadata: OcrNamingMetadata | None = None
 
 
 class MultiCropScanPipeline:
@@ -77,11 +83,15 @@ class MultiCropScanPipeline:
         deskew_processor: DeskewCropProcessor | None = None,
         orientation_corrector: AutoOrientationCorrector | None = None,
         bleed_through_remover: BleedThroughRemover | None = None,
+        ocr_engine: JapaneseOcrEngine | None = None,
+        ocr_extractor: OcrNamingExtractor | None = None,
     ) -> None:
         self.config = config or MultiCropPipelineConfig()
         self._deskew_processor = deskew_processor or DeskewCropProcessor()
         self._orientation_corrector = orientation_corrector or AutoOrientationCorrector()
         self._bleed_through_remover = bleed_through_remover or BleedThroughRemover()
+        self._ocr_engine = ocr_engine
+        self._ocr_extractor = ocr_extractor
         self._last_processed_documents: tuple[ProcessedDocument, ...] = ()
 
     @property
@@ -287,12 +297,20 @@ class MultiCropScanPipeline:
             filtered = self._bleed_through_remover.apply(
                 filtered, self.config.bleed_through
             ).image
+        ocr_meta: OcrNamingMetadata | None = None
+        if self.config.ocr_naming_enabled:
+            from open_escl_client.core.ocr_naming import OcrNamingExtractor
+
+            ocr_engine = self._ocr_engine or JapaneseOcrEngine()
+            extractor = self._ocr_extractor or OcrNamingExtractor()
+            ocr_meta = extractor.extract(ocr_engine.recognize(filtered))
         return ProcessedDocument(
             image=filtered,
             box=box,
             rotation_cw_deg=rotation_cw_deg,
             orientation_source=orientation_source,
             encoded_bytes=self._encode(filtered),
+            ocr_metadata=ocr_meta,
         )
 
     def _encode(self, bgr: np.ndarray) -> bytes:

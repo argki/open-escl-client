@@ -1733,6 +1733,135 @@ def test_expanded_save_formats_ui_bindings_and_export(tmp_path: Path) -> None:
     engine.deleteLater()
 
 
+def test_ocr_naming_preview_extraction_token_insertion_and_save(tmp_path: Path) -> None:
+    """OCR naming extracts title/date on preview, updates QML preview, and names saved files."""
+    import numpy as np
+    from PySide6.QtCore import QCoreApplication
+
+    from open_escl_client.imaging.ocr import (
+        JapaneseOcrEngine,
+        OcrBoundingBox,
+        OcrConfig,
+        OcrResult,
+        OcrTextBlock,
+    )
+
+    class _MockInvoiceOcrBackend:
+        @property
+        def name(self) -> str:
+            return "mock_vision_ocr"
+
+        def is_available(self) -> bool:
+            return True
+
+        def recognize(self, image: np.ndarray, config: OcrConfig) -> OcrResult:
+            h, w = image.shape[:2]
+            blocks = (
+                OcrTextBlock(
+                    text="御請求書",
+                    bbox=OcrBoundingBox(0.1, 0.08, 0.4, 0.06),
+                    confidence=0.98,
+                ),
+                OcrTextBlock(
+                    text="発行日: 令和6年11月20日",
+                    bbox=OcrBoundingBox(0.1, 0.18, 0.5, 0.03),
+                    confidence=0.95,
+                ),
+            )
+            return OcrResult(
+                blocks=blocks,
+                full_text="御請求書\n発行日: 令和6年11月20日",
+                backend_name=self.name,
+                image_width=w,
+                image_height=h,
+                applied=True,
+            )
+
+    _ensure_qapp()
+    buf = BytesIO()
+    Image.new("RGB", (400, 560), color=(248, 248, 246)).save(buf, format="JPEG", quality=92)
+    scan_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=scan_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    cfg_path = tmp_path / "ocr_cfg.json"
+    save_dir = tmp_path / "scans"
+    vm = AppViewModel(
+        config_store=UserConfigStore(cfg_path),
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        ocr_engine=JapaneseOcrEngine(backends=[_MockInvoiceOcrBackend()]),
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.saveDirectory = str(save_dir)
+    vm.autoCropEnabled = False
+    vm.ocrNamingEnabled = True
+
+    engine, _ = create_qml_engine(vm)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+
+    ocr_cb = root.findChild(QObject, "ocrNamingCheckBox")
+    extract_btn = root.findChild(QObject, "extractOcrNamingButton")
+    title_field = root.findChild(QObject, "ocrTitleField")
+    date_field = root.findChild(QObject, "ocrDateField")
+    preset_btn = root.findChild(QObject, "applyOcrPresetButton")
+    save_panel = root.findChild(QObject, "saveSettingsPanel")
+    assert ocr_cb is not None and extract_btn is not None
+    assert title_field is not None and date_field is not None and preset_btn is not None
+    assert save_panel is not None
+
+    # Preview runs OCR automatically when ocrNamingEnabled is True
+    vm.requestPreview()
+    QCoreApplication.processEvents()
+    assert vm.ocrTitle == "御請求書"
+    assert vm.ocrDate == "20241120"
+    assert str(title_field.property("text")) == "御請求書"
+    assert str(date_field.property("text")) == "20241120"
+
+    # Apply OCR preset and confirm live filename preview & manual override
+    preset_btn.click()
+    QCoreApplication.processEvents()
+    assert vm.namingRule == "{ocr_date}_{ocr_title}_{seq:03d}"
+    assert vm.nextFilenamePreview == "20241120_御請求書_001.pdf"
+
+    vm.ocrTitle = "支払請求書"
+    QCoreApplication.processEvents()
+    assert vm.nextFilenamePreview == "20241120_支払請求書_001.pdf"
+
+    # Ensure expanded OCR naming UI stays within SaveSettingsPanel bounds
+    root.grabWindow()
+    QCoreApplication.processEvents()
+    avail = float(save_panel.property("availableWidth"))
+    col = save_panel.property("contentItem").childItems()[0]
+    for ch in col.childItems():
+        assert float(ch.property("x")) + float(ch.property("width")) <= avail + 0.5
+
+    # Main scan save writes file using extracted/edited OCR naming tokens
+    vm.requestScanAndSave()
+    QCoreApplication.processEvents()
+    saved_files = list(save_dir.glob("*.pdf"))
+    assert len(saved_files) == 1
+    assert saved_files[0].name == "20241120_支払請求書_001.pdf"
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+    # ocrNamingEnabled persists across restart
+    vm2 = AppViewModel(config_store=UserConfigStore(cfg_path), run_preview_async=False)
+    assert vm2.ocrNamingEnabled is True
+
+
 
 
 
