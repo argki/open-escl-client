@@ -57,6 +57,10 @@ def test_user_config_store_roundtrip_and_validation(tmp_path: Path) -> None:
         bleed_through_enabled=False,
         bleed_through_strength=0.85,
         bleed_through_whiten_background=False,
+        expanded_sidebar_sections={
+            "scannerConnectionDetailsSection": True,
+            "bleedThroughDetailsSection": True,
+        },
     )
     saved_path = store.save(custom)
     assert saved_path.is_file()
@@ -83,6 +87,10 @@ def test_user_config_store_roundtrip_and_validation(tmp_path: Path) -> None:
     assert reloaded.bleed_through_enabled is False
     assert reloaded.bleed_through_strength == 0.85
     assert reloaded.bleed_through_whiten_background is False
+    assert reloaded.expanded_sidebar_sections == {
+        "scannerConnectionDetailsSection": True,
+        "bleedThroughDetailsSection": True,
+    }
     assert reloaded.resolved_save_directory() == tmp_path / "MyScans"
 
     # Reset restores all defaults on disk
@@ -91,6 +99,7 @@ def test_user_config_store_roundtrip_and_validation(tmp_path: Path) -> None:
     assert reset_cfg.preview_dpi == 100
     assert reset_cfg.bleed_through_enabled is True
     assert reset_cfg.bleed_through_whiten_background is True
+    assert reset_cfg.expanded_sidebar_sections == {}
     assert store.load() == reset_cfg
 
 

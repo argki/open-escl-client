@@ -1507,6 +1507,135 @@ def test_crop_interior_move_area_and_full_restart_persistence(tmp_path: Path) ->
     assert vm2.bleedThroughEnabled is True
 
 
+def test_sidebar_collapsible_sections_default_toggle_width_and_persistence(
+    tmp_path: Path,
+) -> None:
+    """Collapsible sidebar sections start collapsed, expand cleanly, fit width, and persist."""
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    cfg_path = tmp_path / "sidebar_sections.json"
+    vm1 = AppViewModel(config_store=UserConfigStore(cfg_path), run_preview_async=False)
+
+    # Defaults stay active even while BleedThrough section starts collapsed
+    assert vm1.bleedThroughEnabled is True
+    assert vm1.bleedThroughWhitenBackground is True
+
+    engine1, _ = create_qml_engine(vm1)
+    for _ in range(2):
+        QCoreApplication.processEvents()
+    root1 = engine1.rootObjects()[0]
+
+    section_names = (
+        "scannerConnectionDetailsSection",
+        "cropBasicOptionsSection",
+        "cropFineAdjustSection",
+        "bleedThroughDetailsSection",
+    )
+    for name in section_names:
+        sec = root1.findChild(QObject, name)
+        hdr = root1.findChild(QObject, name + "Header")
+        assert sec is not None and hdr is not None
+        assert bool(sec.property("expanded")) is False
+
+    # Expand every collapsible section and verify inner controls are visible and interactive
+    for name in section_names:
+        sec = root1.findChild(QObject, name)
+        assert sec is not None
+        sec.toggle()
+    root1.grabWindow()
+    QCoreApplication.processEvents()
+
+    for name in section_names:
+        sec = root1.findChild(QObject, name)
+        assert sec is not None
+        assert bool(sec.property("expanded")) is True
+        assert float(sec.property("height")) > 60.0
+
+    for child_name in (
+        "refreshScannerButton",
+        "manualHostField",
+        "autoCropCheckBox",
+        "cropMarginSlider",
+        "fineAngleSlider",
+        "bleedThroughCheckBox",
+        "bleedThroughStrengthSlider",
+        "bleedThroughWhitenCheckBox",
+    ):
+        ctrl = root1.findChild(QObject, child_name)
+        assert ctrl is not None
+        assert bool(ctrl.property("visible")) is True
+
+    # Operate controls after expanding (real AbstractButton click emits toggled)
+    auto_crop_cb = root1.findChild(QObject, "autoCropCheckBox")
+    bleed_cb = root1.findChild(QObject, "bleedThroughCheckBox")
+    assert auto_crop_cb is not None and bleed_cb is not None
+    auto_crop_cb.click()
+    bleed_cb.click()
+    QCoreApplication.processEvents()
+    assert vm1.autoCropEnabled is False
+    assert vm1.bleedThroughEnabled is False
+
+    # Verify expanded panels never exceed SaveSettingsPanel width or invade previewArea
+    preview_area = root1.findChild(QObject, "previewArea")
+    save_panel = root1.findChild(QObject, "saveSettingsPanel")
+    crop_panel = root1.findChild(QObject, "cropSettingsPanel")
+    bleed_panel = root1.findChild(QObject, "bleedThroughPanel")
+    assert preview_area is not None and save_panel is not None
+    assert crop_panel is not None and bleed_panel is not None
+
+    for win_w in (1180, 920):
+        root1.setProperty("width", win_w)
+        root1.grabWindow()
+        QCoreApplication.processEvents()
+        save_w = float(save_panel.property("width"))
+        assert float(crop_panel.property("width")) <= save_w + 0.5
+        assert float(bleed_panel.property("width")) <= save_w + 0.5
+        for pname in (
+            "scannerSelectPanel",
+            "scanSettingsPanel",
+            "cropSettingsPanel",
+            "bleedThroughPanel",
+            "saveSettingsPanel",
+        ):
+            gb = root1.findChild(QObject, pname)
+            assert gb is not None
+            avail = float(gb.property("availableWidth"))
+            col = gb.property("contentItem").childItems()[0]
+            for ch in col.childItems():
+                right = float(ch.property("x")) + float(ch.property("width"))
+                assert right <= avail + 0.5
+
+    for obj in engine1.rootObjects():
+        obj.deleteLater()
+    engine1.deleteLater()
+
+    # Restart restores expanded states, and resetAllSettingsToDefaults collapses them back
+    vm2 = AppViewModel(config_store=UserConfigStore(cfg_path), run_preview_async=False)
+    engine2, _ = create_qml_engine(vm2)
+    for _ in range(2):
+        QCoreApplication.processEvents()
+    root2 = engine2.rootObjects()[0]
+    for name in section_names:
+        sec = root2.findChild(QObject, name)
+        assert sec is not None
+        assert bool(sec.property("expanded")) is True
+
+    vm2.resetAllSettingsToDefaults()
+    root2.grabWindow()
+    QCoreApplication.processEvents()
+    for name in section_names:
+        sec = root2.findChild(QObject, name)
+        assert sec is not None
+        assert bool(sec.property("expanded")) is False
+        assert float(sec.property("height")) <= 40.0
+
+    for obj in engine2.rootObjects():
+        obj.deleteLater()
+    engine2.deleteLater()
+
+
+
 
 
 
