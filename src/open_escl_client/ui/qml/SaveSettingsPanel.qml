@@ -176,16 +176,20 @@ GroupBox {
         }
 
         // --------------------------------------------------------------------
-        // 圧縮品質スライダー（JPEG品質 / PDF内画像品質 / PNG圧縮度）
+        // 圧縮品質スライダー（JPEG / WebP / PDF画質 / PNG圧縮度）
         // --------------------------------------------------------------------
         RowLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
+            visible: viewModel ? viewModel.supportsQuality : true
 
             Label {
-                text: viewModel && viewModel.selectedSaveFormat === "PNG"
-                      ? "画質・圧縮バランス"
-                      : "圧縮品質 (JPEG / PDF画質)"
+                text: {
+                    if (!viewModel) return "圧縮品質 (JPEG / PDF画質)"
+                    if (viewModel.selectedSaveFormat === "PNG") return "画質・圧縮バランス"
+                    if (viewModel.selectedSaveFormat === "WebP") return "圧縮品質 (WebP画質)"
+                    return "圧縮品質 (JPEG / PDF画質)"
+                }
                 font.bold: true
                 color: "#374151"
                 Layout.fillWidth: true
@@ -206,6 +210,7 @@ GroupBox {
             objectName: "jpegQualitySlider"
             Layout.fillWidth: true
             Layout.minimumWidth: 0
+            visible: viewModel ? viewModel.supportsQuality : true
             from: 10
             to: 100
             stepSize: 5
@@ -218,16 +223,16 @@ GroupBox {
         }
 
         // --------------------------------------------------------------------
-        // マルチページPDF結合モード（PDF選択時）
+        // マルチページ結合モード（PDF / TIFF選択時）
         // --------------------------------------------------------------------
         CheckBox {
             id: multipagePdfCheckBox
             objectName: "multipagePdfCheckBox"
             Layout.fillWidth: true
             Layout.minimumWidth: 0
-            visible: viewModel ? viewModel.selectedSaveFormat === "PDF" : true
+            visible: viewModel ? viewModel.supportsMultipage : true
             checked: viewModel ? viewModel.multipagePdf : false
-            text: "連続スキャンを1つのPDFに結合"
+            text: "複数スキャンを1つのPDF/TIFFファイルに結合"
             onToggled: {
                 if (viewModel) {
                     viewModel.multipagePdf = checked

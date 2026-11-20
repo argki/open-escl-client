@@ -1,6 +1,6 @@
 # REQ-011: 保存ファイル形式の拡充（TIFF / WebP / BMP / GIF 等の一般画像形式対応）
 
-- **ステータス**: `進行中`
+- **ステータス**: `完了`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-004`](./REQ-004-scan-save-and-continuous-workflow.md)
@@ -23,10 +23,10 @@
 
 ## 3. 完了条件（Acceptance Criteria）
 
-- [ ] 保存形式ドロップダウンから `PDF`, `JPEG`, `PNG`, `TIFF`, `WebP`, `BMP`, `GIF` を選択でき、それぞれの正しい拡張子で保存されること
-- [ ] `JPEG` / `WebP` 選択時は圧縮品質が反映され、`TIFF` 選択時は DPI メタデータ（およびマルチページ選択時は複数ページ TIFF）が正しく出力されること
-- [ ] Brother × macOS 環境（またはモック検証）で意図通り動作すること
-- [ ] Windows や汎用 eSCL 機器への将来対応を阻害するハードコードが含まれていないこと
+- [x] 保存形式ドロップダウンから `PDF`, `JPEG`, `PNG`, `TIFF`, `WebP`, `BMP`, `GIF` を選択でき、それぞれの正しい拡張子で保存されること
+- [x] `JPEG` / `WebP` 選択時は圧縮品質が反映され、`TIFF` 選択時は DPI メタデータ（およびマルチページ選択時は複数ページ TIFF）が正しく出力されること
+- [x] Brother × macOS 環境（またはモック検証）で意図通り動作すること
+- [x] Windows や汎用 eSCL 機器への将来対応を阻害するハードコードが含まれていないこと
 
 ---
 
@@ -70,7 +70,7 @@ PDF・JPEG・PNG に加えて一般的な画像フォーマット（TIFF / WebP 
 
 ### タスク 2: `AppViewModel` と `SaveSettingsPanel.qml` の保存形式選択 UI 更新
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/viewmodel.py` の `saveFormats` リスト、`showJpegQuality`（`JPEG` と `WebP` で有効化する `supportsQuality` 等）、`supportsMultipage`（`PDF` と `TIFF` でマルチページ結合トグルを有効化）、およびプレビュー保存ファイル名の更新処理を全形式へ対応させる
   - `src/open_escl_client/ui/qml/SaveSettingsPanel.qml` の形式選択コンボボックスと品質スライダー・マルチページ結合チェックボックスの表示テキスト（例: `複数スキャンを1つのPDF/TIFFファイルに結合`）を更新する

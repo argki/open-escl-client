@@ -46,7 +46,8 @@ Rectangle {
                         parts.push("保存済み: " + viewModel.savedFileCount + "件 (最新: " + viewModel.lastSavedFileName + ")")
                     }
                     if (viewModel.pendingPdfPageCount > 0) {
-                        parts.push("PDF結合待ち: " + viewModel.pendingPdfPageCount + "ページ")
+                        var pendingFmt = viewModel.selectedSaveFormat === "TIFF" ? "TIFF" : "PDF"
+                        parts.push(pendingFmt + "結合待ち: " + viewModel.pendingPdfPageCount + "ページ")
                     }
                     return parts.join(" / ")
                 }
@@ -73,13 +74,16 @@ Rectangle {
             }
         }
 
-        // マルチページPDF結合・保存確定ボタン
+        // マルチページPDF/TIFF結合・保存確定ボタン
         Button {
             id: finalizePdfButton
             objectName: "finalizePdfButton"
             visible: viewModel ? viewModel.pendingPdfPageCount > 0 : false
             enabled: viewModel ? !viewModel.isBusy : false
-            text: viewModel ? ("PDFを保存 (" + viewModel.pendingPdfPageCount + "P)") : "PDFを保存"
+            text: viewModel
+                  ? ((viewModel.selectedSaveFormat === "TIFF" ? "TIFF" : "PDF")
+                     + "を保存 (" + viewModel.pendingPdfPageCount + "P)")
+                  : "PDFを保存"
             Layout.preferredHeight: 40
             Layout.preferredWidth: 160
             onClicked: {
@@ -110,7 +114,7 @@ Rectangle {
         Button {
             id: scanAndSaveButton
             objectName: "scanAndSaveButton"
-            text: (viewModel && viewModel.multipagePdf && viewModel.selectedSaveFormat === "PDF")
+            text: (viewModel && viewModel.multipagePdf && viewModel.supportsMultipage)
                   ? "ページを追加スキャン"
                   : "スキャンして保存 (連続可)"
             highlighted: true
