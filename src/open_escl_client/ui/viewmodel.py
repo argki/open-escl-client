@@ -56,6 +56,7 @@ from open_escl_client.imaging.multi_crop import (
     encode_image_bytes,
     normalize_aspect_ratio_preset,
     normalize_detection_preset,
+    oriented_aspect_ratio_for_preset,
 )
 from open_escl_client.imaging.orientation import (
     AutoOrientationCorrector,
@@ -164,6 +165,7 @@ class AppViewModel(QObject):
     previewZoomChanged = Signal()
     cropSettingsChanged = Signal()
     cropBoxesChanged = Signal()
+    cropOverlayChanged = Signal()
 
     # Internal thread-safe completion signals for background scan tasks
     _previewFinishedInternal = Signal(object)
@@ -207,6 +209,7 @@ class AppViewModel(QObject):
         self._previewFailedInternal.connect(self._on_preview_failed)
         self._scanSaveFinishedInternal.connect(self._on_scan_save_finished)
         self._scanSaveFailedInternal.connect(self._on_scan_save_failed)
+        self.cropBoxesChanged.connect(self.cropOverlayChanged)
 
         loaded_cfg = self._config_store.load() if self._config_store is not None else UserConfig()
 
@@ -297,6 +300,9 @@ class AppViewModel(QObject):
         self._crop_aspect_ratios: list[AspectRatioPreset] = []
         self._crop_thumbnail_urls: dict[int, str] = {}
         self._selected_crop_index: int = -1
+        self._lock_crop_aspect_ratio: bool = False
+        self._dragging_crop_index: int = -1
+        self._drag_locked_aspect_ratio: float | None = None
         self._preview_boxes_ready_for_save: bool = False
         self._last_scan_pipeline: MultiCropScanPipeline | None = None
 
@@ -778,6 +784,17 @@ class AppViewModel(QObject):
             if self._auto_crop_enabled and self._preview_bgr is not None:
                 self._analyze_preview_crops()
 
+    @Property(bool, notify=cropSettingsChanged)
+    def lockCropAspectRatio(self) -> bool:
+        return self._lock_crop_aspect_ratio
+
+    @lockCropAspectRatio.setter
+    def lockCropAspectRatio(self, value: bool) -> None:
+        flag = bool(value)
+        if self._lock_crop_aspect_ratio != flag:
+            self._lock_crop_aspect_ratio = flag
+            self.cropSettingsChanged.emit()
+
     @Property(int, notify=cropBoxesChanged)
     def selectedCropSensitivity(self) -> int:
         if 0 <= self._selected_crop_index < len(self._crop_sensitivities):
@@ -883,8 +900,7 @@ class AppViewModel(QObject):
             return int(self._crop_boxes[self._selected_crop_index].effective_rotation_cw_deg)
         return 0
 
-    @Property("QVariantList", notify=cropBoxesChanged)
-    def cropBoxes(self) -> list[dict[str, object]]:
+    def _serialize_crop_boxes(self) -> list[dict[str, object]]:
         """Serialize detected/adjusted crop boxes into normalized coordinates for QML."""
         if not self._crop_boxes or self._preview_session is None:
             return []
@@ -931,6 +947,16 @@ class AppViewModel(QObject):
             )
         return result
 
+    @Property("QVariantList", notify=cropBoxesChanged)
+    def cropBoxes(self) -> list[dict[str, object]]:
+        """Serialize detected/adjusted crop boxes into normalized coordinates for QML."""
+        return self._serialize_crop_boxes()
+
+    @Property("QVariantList", notify=cropOverlayChanged)
+    def cropOverlayBoxes(self) -> list[dict[str, object]]:
+        """Lightweight geometry list updated live during canvas dragging."""
+        return self._serialize_crop_boxes()
+
     @property
     def detected_crop_boxes(self) -> list[RotatedCropBox]:
         """Return the current list of preview-space `RotatedCropBox` instances."""
@@ -943,6 +969,8 @@ class AppViewModel(QObject):
         self._crop_aspect_ratios = []
         self._crop_thumbnail_urls = {}
         self._selected_crop_index = -1
+        self._dragging_crop_index = -1
+        self._drag_locked_aspect_ratio = None
         self._active_preview_mode = "full"
         self._inspect_preview_url = ""
         self._image_provider.clear_crop_thumbnails()
@@ -1236,6 +1264,75 @@ class AppViewModel(QObject):
         else:
             self.set_status_message("自動トリミング枠は検出されませんでした")
 
+    def _resolve_corner_drag_ratio(
+        self,
+        list_index: int,
+        box: RotatedCropBox,
+        dpi: float,
+        *,
+        lock_override: bool = False,
+    ) -> tuple[bool, float | None]:
+        preset = (
+            self._crop_aspect_ratios[list_index]
+            if 0 <= list_index < len(self._crop_aspect_ratios)
+            else self._aspect_ratio_preset
+        )
+        _, _, cur_w, cur_h, _ = box.resolved_geometry(dpi=dpi)
+        preset_ratio = oriented_aspect_ratio_for_preset(preset, cur_w, cur_h)
+        if preset_ratio is not None:
+            if (
+                self._dragging_crop_index == list_index
+                and self._drag_locked_aspect_ratio is not None
+            ):
+                return True, self._drag_locked_aspect_ratio
+            return True, preset_ratio
+        should_lock = self._lock_crop_aspect_ratio or bool(lock_override)
+        if not should_lock:
+            return False, None
+        if self._dragging_crop_index == list_index and self._drag_locked_aspect_ratio is not None:
+            return True, self._drag_locked_aspect_ratio
+        current_ratio = float(cur_w) / float(cur_h) if cur_h > 0.0 else 1.0
+        return True, current_ratio
+
+    @Slot(int)
+    def beginCropDrag(self, list_index: int) -> None:
+        """Start an interactive drag session without rebuilding thumbnails every frame."""
+        if self._preview_session is None or not (0 <= list_index < len(self._crop_boxes)):
+            self._dragging_crop_index = -1
+            self._drag_locked_aspect_ratio = None
+            return
+        self._dragging_crop_index = int(list_index)
+        box = self._crop_boxes[list_index]
+        dpi = float(self._preview_session.preview_dpi)
+        _, _, cur_w, cur_h, _ = box.resolved_geometry(dpi=dpi)
+        preset = (
+            self._crop_aspect_ratios[list_index]
+            if list_index < len(self._crop_aspect_ratios)
+            else self._aspect_ratio_preset
+        )
+        preset_ratio = oriented_aspect_ratio_for_preset(preset, cur_w, cur_h)
+        if preset_ratio is not None:
+            self._drag_locked_aspect_ratio = preset_ratio
+        elif cur_h > 0.0:
+            self._drag_locked_aspect_ratio = float(cur_w) / float(cur_h)
+        else:
+            self._drag_locked_aspect_ratio = 1.0
+
+    @Slot(int)
+    def endCropDrag(self, list_index: int) -> None:
+        """Finish an interactive drag session and rebuild the crop thumbnail once."""
+        was_dragging = self._dragging_crop_index >= 0
+        target_idx = (
+            int(list_index)
+            if 0 <= list_index < len(self._crop_boxes)
+            else self._dragging_crop_index
+        )
+        self._dragging_crop_index = -1
+        self._drag_locked_aspect_ratio = None
+        if was_dragging and 0 <= target_idx < len(self._crop_boxes):
+            self._rebuild_crop_thumbnail(target_idx)
+            self.cropBoxesChanged.emit()
+
     @Slot(int, float, float)
     def moveCropBoxByNorm(self, list_index: int, dx_norm: float, dy_norm: float) -> None:
         """Translate crop box `list_index` by normalized delta `(dx_norm, dy_norm)`."""
@@ -1248,16 +1345,21 @@ class AppViewModel(QObject):
         )
         self._selected_crop_index = list_index
         self._preview_boxes_ready_for_save = True
+        if self._dragging_crop_index == list_index:
+            self.cropOverlayChanged.emit()
+            return
         self._rebuild_crop_thumbnail(list_index)
         self.cropBoxesChanged.emit()
 
     @Slot(int, int, float, float)
+    @Slot(int, int, float, float, bool)
     def dragCropCornerToNorm(
         self,
         list_index: int,
         corner_index: int,
         norm_x: float,
         norm_y: float,
+        lock_aspect_ratio: bool = False,
     ) -> None:
         """Resize crop box `list_index` by moving corner `corner_index` to normalized `(x, y)`."""
         if self._preview_session is None or not (0 <= list_index < len(self._crop_boxes)):
@@ -1265,14 +1367,26 @@ class AppViewModel(QObject):
         px_x = float(np.clip(norm_x, 0.0, 1.0)) * float(self._preview_session.image_width_px)
         px_y = float(np.clip(norm_y, 0.0, 1.0)) * float(self._preview_session.image_height_px)
         dpi = float(self._preview_session.preview_dpi)
-        self._crop_boxes[list_index] = self._crop_boxes[list_index].with_corner_drag(
+        box = self._crop_boxes[list_index]
+        should_lock, target_ratio = self._resolve_corner_drag_ratio(
+            list_index,
+            box,
+            dpi,
+            lock_override=lock_aspect_ratio,
+        )
+        self._crop_boxes[list_index] = box.with_corner_drag(
             int(corner_index),
             px_x,
             px_y,
             dpi=dpi,
+            lock_aspect_ratio=should_lock,
+            target_aspect_ratio=target_ratio,
         )
         self._selected_crop_index = list_index
         self._preview_boxes_ready_for_save = True
+        if self._dragging_crop_index == list_index:
+            self.cropOverlayChanged.emit()
+            return
         self._rebuild_crop_thumbnail(list_index)
         self.cropBoxesChanged.emit()
 

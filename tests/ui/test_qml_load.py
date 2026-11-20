@@ -1150,6 +1150,138 @@ def test_crop_card_click_inspects_document_and_full_card_returns_to_overview() -
     engine.deleteLater()
 
 
+def test_crop_drag_session_defers_thumbnail_rebuild_and_supports_aspect_ratio_lock() -> None:
+    """Drag session updates overlay without rebuilding delegates/thumbs and locks aspect ratio."""
+    import math
+
+    import numpy as np
+    import pytest
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[120:480, 200:500] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+    assert vm.cropCount == 1
+
+    engine, _ = create_qml_engine(vm)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+    lock_cb = root.findChild(QObject, "lockAspectRatioCheckBox")
+    crop_overlay = root.findChild(QObject, "cropOverlay")
+    assert lock_cb is not None
+    assert crop_overlay is not None
+
+    def _find_visual_item(item: QObject, target_name: str) -> QObject | None:
+        if item.objectName() == target_name:
+            return item
+        child_items = getattr(item, "childItems", None)
+        if callable(child_items):
+            for ch in child_items():
+                found = _find_visual_item(ch, target_name)
+                if found is not None:
+                    return found
+        return None
+
+    delegate_before = _find_visual_item(crop_overlay, "cropBoxDelegate_0")
+    handle_before = _find_visual_item(crop_overlay, "cropCornerHandle_1_0")
+    assert delegate_before is not None
+    assert handle_before is not None
+
+    overlay_signals = 0
+    boxes_signals = 0
+
+    def _on_overlay() -> None:
+        nonlocal overlay_signals
+        overlay_signals += 1
+
+    def _on_boxes() -> None:
+        nonlocal boxes_signals
+        boxes_signals += 1
+
+    vm.cropOverlayChanged.connect(_on_overlay)
+    vm.cropBoxesChanged.connect(_on_boxes)
+
+    initial_thumb_url = str(vm.cropBoxes[0]["thumbnailUrl"])
+    initial_w = float(vm.cropBoxes[0]["widthPx"])
+    initial_h = float(vm.cropBoxes[0]["heightPx"])
+    initial_ratio = initial_w / initial_h
+
+    # Drag session with Shift-lock (lock_aspect_ratio=True): emits overlay only, preserves delegate
+    vm.beginCropDrag(0)
+    vm.moveCropBoxByNorm(0, 0.03, 0.02)
+    vm.dragCropCornerToNorm(0, 0, 0.15, 0.10, True)
+    vm.dragCropCornerToNorm(0, 0, 0.10, 0.14, True)
+    QCoreApplication.processEvents()
+
+    assert overlay_signals == 3
+    assert boxes_signals == 0
+    assert str(vm.cropBoxes[0]["thumbnailUrl"]) == initial_thumb_url
+    delegate_during = _find_visual_item(crop_overlay, "cropBoxDelegate_0")
+    handle_during = _find_visual_item(crop_overlay, "cropCornerHandle_1_0")
+    assert delegate_during is delegate_before
+    assert handle_during is handle_before
+
+    new_w = float(vm.cropOverlayBoxes[0]["widthPx"])
+    new_h = float(vm.cropOverlayBoxes[0]["heightPx"])
+    assert (new_w / new_h) == pytest.approx(initial_ratio, abs=0.02)
+
+    # End drag commits once and rebuilds thumbnail
+    vm.endCropDrag(0)
+    QCoreApplication.processEvents()
+    assert boxes_signals == 1
+    assert str(vm.cropBoxes[0]["thumbnailUrl"]) != initial_thumb_url
+
+    # Property toggle lockCropAspectRatio works even when default preset is auto
+    vm.lockCropAspectRatio = True
+    assert vm.lockCropAspectRatio is True
+    box_before = vm.cropBoxes[0]
+    ratio_before_toggle_drag = float(box_before["widthPx"]) / float(box_before["heightPx"])
+    vm.beginCropDrag(0)
+    vm.dragCropCornerToNorm(0, 2, 0.90, 0.70, False)
+    vm.endCropDrag(0)
+    box_after = vm.cropBoxes[0]
+    ratio_after_toggle_drag = float(box_after["widthPx"]) / float(box_after["heightPx"])
+    assert ratio_after_toggle_drag == pytest.approx(ratio_before_toggle_drag, abs=0.02)
+
+    # Fixed preset (ISO A/B) enforces 1:sqrt(2) automatically even if lockCropAspectRatio is False
+    vm.lockCropAspectRatio = False
+    iso_label = next(lbl for lbl in vm.aspectRatioPresets if "A判" in lbl)
+    vm.selectedCropAspectRatioPreset = iso_label
+    vm.beginCropDrag(0)
+    vm.dragCropCornerToNorm(0, 2, 0.85, 0.92, False)
+    vm.endCropDrag(0)
+    fixed_w = float(vm.cropBoxes[0]["widthPx"])
+    fixed_h = float(vm.cropBoxes[0]["heightPx"])
+    long_short = max(fixed_w, fixed_h) / min(fixed_w, fixed_h)
+    assert long_short == pytest.approx(math.sqrt(2.0), abs=0.02)
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+
 
 
 

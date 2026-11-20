@@ -99,6 +99,21 @@ def normalize_aspect_ratio_preset(preset: str) -> AspectRatioPreset:
     return "auto"
 
 
+def oriented_aspect_ratio_for_preset(
+    preset: AspectRatioPreset | str,
+    width: float,
+    height: float,
+) -> float | None:
+    """Return oriented `width / height` ratio for a preset based on current box orientation."""
+    normalized = normalize_aspect_ratio_preset(str(preset))
+    long_over_short = ASPECT_RATIO_PRESET_RATIOS.get(normalized)
+    if long_over_short is None:
+        return None
+    if float(width) >= float(height):
+        return float(long_over_short)
+    return 1.0 / float(long_over_short)
+
+
 def mm_to_px(mm: float, dpi: float) -> float:
     """Convert millimeters to pixels at the given DPI."""
     if dpi <= 0.0:
@@ -483,11 +498,16 @@ class RotatedCropBox:
         *,
         dpi: float | None = None,
         min_size_px: float = 12.0,
+        lock_aspect_ratio: bool = False,
+        target_aspect_ratio: float | None = None,
     ) -> RotatedCropBox:
         """Resize the rotated crop box by dragging corner `corner_index` (0=TL..3=BL).
 
         Keeps the opposite corner fixed in image coordinates and bakes any existing
-        margin offsets into the updated base rectangle geometry.
+        margin offsets into the updated base rectangle geometry. When
+        `lock_aspect_ratio` is True, maintains either `target_aspect_ratio`
+        (`width / height`) or the current box aspect ratio while keeping the
+        opposite corner fixed.
         """
         if corner_index not in (0, 1, 2, 3):
             raise ValueError(f"corner_index must be 0..3, got {corner_index}")
@@ -511,8 +531,22 @@ class RotatedCropBox:
         signs = ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0))
         sign_u, sign_v = signs[corner_index]
 
-        new_w = max(float(min_size_px), local_u * sign_u)
-        new_h = max(float(min_size_px), local_v * sign_v)
+        raw_u = local_u * sign_u
+        raw_v = local_v * sign_v
+
+        if lock_aspect_ratio:
+            if target_aspect_ratio is not None and float(target_aspect_ratio) > 0.0:
+                ratio = float(target_aspect_ratio)
+            else:
+                _, _, cur_w, cur_h, _ = self.resolved_geometry(dpi=dpi)
+                ratio = float(cur_w) / float(cur_h) if cur_h > 0.0 else 1.0
+            projected_h = (raw_u * ratio + raw_v) / (ratio * ratio + 1.0)
+            min_h = max(float(min_size_px), float(min_size_px) / ratio)
+            new_h = max(min_h, projected_h)
+            new_w = new_h * ratio
+        else:
+            new_w = max(float(min_size_px), raw_u)
+            new_h = max(float(min_size_px), raw_v)
 
         half_u = 0.5 * sign_u * new_w
         half_v = 0.5 * sign_v * new_h

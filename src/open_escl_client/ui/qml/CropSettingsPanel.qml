@@ -184,6 +184,18 @@ GroupBox {
                     }
                 }
             }
+
+            CheckBox {
+                id: lockAspectRatioCheckBox
+                objectName: "lockAspectRatioCheckBox"
+                text: "比率を維持して枠調整 (または Shift+ドラッグ)"
+                checked: viewModel ? viewModel.lockCropAspectRatio : false
+                onToggled: {
+                    if (viewModel) {
+                        viewModel.lockCropAspectRatio = checked
+                    }
+                }
+            }
         }
 
         // 余白の一括微調整（mm: 負値で内側に削る／正値で外側に広げる）

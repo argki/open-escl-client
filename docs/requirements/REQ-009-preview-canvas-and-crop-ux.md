@@ -1,6 +1,6 @@
 # REQ-009: プレビューキャンバスの操作性向上・切り出し拡大表示と検出枠ドラッグ修正
 
-- **ステータス**: `進行中`
+- **ステータス**: `完了`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-003`](./REQ-003-fast-preview-scan.md), [`REQ-005`](./REQ-005-multi-crop-and-rotation-correction.md)
@@ -102,7 +102,7 @@ feat(ui): 切り出しカードのメインキャンバス拡大表示と「全�
 
 ### タスク 3: 検出枠ドラッグ調整（移動・リサイズ）の途切れ根本修正と比率維持リサイズ対応
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - **途切れ原因の修正**: `src/open_escl_client/ui/qml/CropOverlay.qml` において、`Repeater` への全配列再代入による delegate 破棄で `MouseArea` ドラッグが中断する構造を見直し、ドラッグ中は QML ローカル状態（またはインデックス維持＋個別データバインディング更新／Canvas 再描画のみ）で滑らかに枠を動かし、ドラッグ中毎フレームの重いサムネイル再生成は行わずリリース時（`onReleased`）に確定反映・サムネイル更新する方式へ改善する
   - **比率維持リサイズ対応**: `src/open_escl_client/imaging/multi_crop.py`（`drag_corner_to` / 新パラメータ `lock_aspect_ratio: bool`）および `AppViewModel.dragCropCornerToNorm` に、選択中の規格比率（`selectedCropAspectRatioPreset` が `auto`/`free` 以外で比率が定まっている場合、または「比率を維持して枠調整」トグル／Shift キー押下時）を維持したまま対角頂点固定で四隅を拡大縮小できるロジックを追加する

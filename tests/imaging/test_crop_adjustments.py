@@ -302,3 +302,67 @@ def test_preview_to_main_scan_dpi_scaling_preserves_margins_and_rotations() -> N
         )
     with pytest.raises(ValueError):
         norm1.to_crop_box(0, 100)
+
+
+@pytest.mark.parametrize("corner_idx", [0, 1, 2, 3])
+def test_corner_drag_with_locked_aspect_ratio_keeps_opposite_corner_and_ratio(
+    corner_idx: int,
+) -> None:
+    """Locked corner drag fixes diagonal anchor and preserves box or target aspect ratio."""
+    box = RotatedCropBox(
+        center_x=500.0,
+        center_y=400.0,
+        width=200.0,
+        height=300.0,
+        angle_deg=18.0,
+        source_width=1000,
+        source_height=800,
+    )
+    before = box.corners()
+    opposite_idx = (corner_idx + 2) % 4
+    anchor_before = before[opposite_idx]
+    orig_ratio = box.width / box.height
+
+    # Pull corner asymmetrically (large horizontal delta, small vertical delta) with ratio lock.
+    orig_pt = before[corner_idx]
+    target_pt = np.array([orig_pt[0] + 90.0, orig_pt[1] - 15.0], dtype=np.float32)
+
+    resized = box.with_corner_drag(
+        corner_idx,
+        float(target_pt[0]),
+        float(target_pt[1]),
+        lock_aspect_ratio=True,
+    )
+    after = resized.corners()
+    assert np.allclose(after[opposite_idx], anchor_before, atol=1e-3)
+    assert (resized.width / resized.height) == pytest.approx(orig_ratio, abs=1e-5)
+
+    # Explicit target ratio (e.g., portrait ISO A/B: 1 / sqrt(2)) and min_size clamping.
+    portrait_iso_ratio = 1.0 / math.sqrt(2.0)
+    clamped = box.with_corner_drag(
+        corner_idx,
+        float(anchor_before[0]),
+        float(anchor_before[1]),
+        min_size_px=20.0,
+        lock_aspect_ratio=True,
+        target_aspect_ratio=portrait_iso_ratio,
+    )
+    assert clamped.width >= 20.0 - 1e-5
+    assert clamped.height >= 20.0 - 1e-5
+    assert (clamped.width / clamped.height) == pytest.approx(portrait_iso_ratio, abs=1e-5)
+
+
+def test_oriented_aspect_ratio_for_preset() -> None:
+    from open_escl_client.imaging.multi_crop import oriented_aspect_ratio_for_preset
+
+    assert oriented_aspect_ratio_for_preset("auto", 100.0, 200.0) is None
+    assert oriented_aspect_ratio_for_preset("free", 200.0, 100.0) is None
+    assert oriented_aspect_ratio_for_preset("iso_a_b", 297.0, 210.0) == pytest.approx(
+        math.sqrt(2.0), abs=1e-6
+    )
+    assert oriented_aspect_ratio_for_preset("iso_a_b", 210.0, 297.0) == pytest.approx(
+        1.0 / math.sqrt(2.0), abs=1e-6
+    )
+    assert oriented_aspect_ratio_for_preset("postcard", 100.0, 148.0) == pytest.approx(
+        100.0 / 148.0, abs=1e-6
+    )
