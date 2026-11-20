@@ -1,5 +1,10 @@
 """Image processing pipelines (cropping, deskew, orientation, color calibration)."""
 
+from open_escl_client.imaging.bleed_through import (
+    BleedThroughConfig,
+    BleedThroughRemover,
+    BleedThroughResult,
+)
 from open_escl_client.imaging.multi_crop import (
     ASPECT_RATIO_PRESET_RATIOS,
     MM_PER_INCH,
@@ -52,6 +57,9 @@ __all__ = [
     "AspectRatioPreset",
     "AutoOrientationCorrector",
     "BackgroundMode",
+    "BleedThroughConfig",
+    "BleedThroughRemover",
+    "BleedThroughResult",
     "CropMarginOffsets",
     "CroppedDocument",
     "DeskewConfig",
