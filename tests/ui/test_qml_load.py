@@ -843,24 +843,36 @@ def test_viewmodel_bleed_through_preview_updates_immediately_without_rescan(
     vm.addManualScanner("192.168.1.50")
     vm.requestPreview()
     assert mock_client.scan_single_page.call_count == 1
+    assert vm.bleedThroughEnabled is True
+    assert vm.bleedThroughWhitenBackground is True
     initial_url = vm.previewImageUrl
 
-    # Enable bleed-through removal -> preview image URL updates immediately without new scan.
+    # Toggling bleed-through removal off and back on updates preview URL without new scan.
+    vm.bleedThroughEnabled = False
+    assert vm.bleedThroughEnabled is False
+    url_after_disable = vm.previewImageUrl
+    assert url_after_disable != initial_url
+
     vm.bleedThroughEnabled = True
     assert vm.bleedThroughEnabled is True
-    assert vm.previewImageUrl != initial_url
+    url_after_enable = vm.previewImageUrl
+    assert url_after_enable != url_after_disable
     assert mock_client.scan_single_page.call_count == 1
 
     # Adjust strength & whiten background -> updates again without rescanning.
-    url_after_enable = vm.previewImageUrl
     vm.bleedThroughStrength = 0.9
     assert vm.bleedThroughStrength == 0.9
-    assert vm.previewImageUrl != url_after_enable
-
     url_after_strength = vm.previewImageUrl
+    assert url_after_strength != url_after_enable
+
+    vm.bleedThroughWhitenBackground = False
+    assert vm.bleedThroughWhitenBackground is False
+    url_after_unwhiten = vm.previewImageUrl
+    assert url_after_unwhiten != url_after_strength
+
     vm.bleedThroughWhitenBackground = True
     assert vm.bleedThroughWhitenBackground is True
-    assert vm.previewImageUrl != url_after_strength
+    assert vm.previewImageUrl != url_after_unwhiten
     assert mock_client.scan_single_page.call_count == 1
 
     # Verify BleedThroughPanel QML components load and stay within sidebar width bounds.
@@ -880,6 +892,124 @@ def test_viewmodel_bleed_through_preview_updates_immediately_without_rescan(
     for obj in engine.rootObjects():
         obj.deleteLater()
     engine.deleteLater()
+
+
+def test_viewmodel_persists_all_settings_and_resets_to_defaults(tmp_path: Path) -> None:
+    """All scan/preview/crop/enhancement preferences persist across restart and reset cleanly."""
+    import numpy as np
+
+    buf = BytesIO()
+    Image.fromarray(np.full((400, 300, 3), 250, dtype=np.uint8)).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    recorded_preview_dpis: list[int] = []
+
+    def _scan(req: EsclScanRequest) -> EsclScanResult:
+        recorded_preview_dpis.append(req.resolution_dpi)
+        return EsclScanResult(
+            image_bytes=preview_bytes,
+            content_type="image/jpeg",
+            job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+            request=req,
+        )
+
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = _scan
+    cfg_store = UserConfigStore(tmp_path / "config.json")
+
+    vm = AppViewModel(
+        config_store=cfg_store,
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+
+    vm.selectedInputSource = "ADF (片面)"
+    target_paper_label = next(lbl for lbl in vm.paperSizes if "B5" in lbl or "横置き" in lbl)
+    vm.selectedPaperSize = target_paper_label
+    vm.selectedResolution = 600
+    vm.selectedPreviewDpi = 300
+    vm.selectedSaveFormat = "JPEG"
+    vm.namingRule = "Custom_{date}_{seq:02d}"
+    vm.autoCropEnabled = False
+    vm.multiDocumentEnabled = False
+    vm.autoOrientationEnabled = False
+    vm.selectedDetectionPreset = "単票・定型紙 (A3内のA4等)"
+    vm.detectionSensitivity = 3
+    vm.selectedCropAspectRatioPreset = "はがき (100×148mm / 1:1.480)"
+    vm.cropMarginMm = -2.0
+    vm.bleedThroughEnabled = False
+    vm.bleedThroughStrength = 0.8
+    vm.bleedThroughWhitenBackground = False
+
+    # Reload into a brand new AppViewModel and connect scanner -> restores A3/ADF/150dpi/crop!
+    vm2 = AppViewModel(
+        config_store=cfg_store,
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    assert vm2.selectedPreviewDpi == 300
+    assert vm2.selectedSaveFormat == "JPEG"
+    assert vm2.namingRule == "Custom_{date}_{seq:02d}"
+    assert vm2.autoCropEnabled is False
+    assert vm2.multiDocumentEnabled is False
+    assert vm2.autoOrientationEnabled is False
+    assert vm2.detectionPresetCode == "standard_sheet"
+    assert vm2.detectionSensitivity == 3
+    assert vm2.selectedCropAspectRatioPreset == "はがき (100×148mm / 1:1.480)"
+    assert vm2.cropMarginMm == -2.0
+    assert vm2.bleedThroughEnabled is False
+    assert vm2.bleedThroughStrength == 0.8
+    assert vm2.bleedThroughWhitenBackground is False
+
+    vm2.addManualScanner("192.168.1.50")
+    assert vm2.selectedPaperSize == target_paper_label
+    assert vm2.selectedInputSource == "ADF (片面)"
+    assert vm2.selectedResolution == 600
+    assert vm2.selectedPreviewDpi == 300
+    assert 300 in vm2.previewDpiChoices
+
+    vm2.requestPreview()
+    assert recorded_preview_dpis[-1] == 300
+    assert vm2.previewDpi == 300
+
+    # Reset all settings back to factory defaults
+    vm2.resetAllSettingsToDefaults()
+    assert vm2.namingRule == "Scan_{date}_{time}_{seq:03d}"
+    assert vm2.selectedSaveFormat == "PDF"
+    assert vm2.selectedResolution == 300
+    assert vm2.selectedPreviewDpi == 100
+    assert vm2.autoCropEnabled is True
+    assert vm2.multiDocumentEnabled is True
+    assert vm2.autoOrientationEnabled is True
+    assert vm2.detectionPresetCode == "auto"
+    assert vm2.detectionSensitivity == 0
+    assert vm2.selectedCropAspectRatioPreset == "自動判別 (推奨)"
+    assert vm2.cropMarginMm == 0.0
+    assert vm2.bleedThroughEnabled is True
+    assert vm2.bleedThroughStrength == 0.6
+    assert vm2.bleedThroughWhitenBackground is True
+    assert "A4" in vm2.selectedPaperSize
+
+    # Verify QML previewDpiCombo, resetAllSettingsButton, and resetSettingsConfirmDialog load.
+    engine, _ = create_qml_engine(vm2)
+    root = engine.rootObjects()[0]
+    preview_dpi_combo = root.findChild(QObject, "previewDpiCombo")
+    reset_btn = root.findChild(QObject, "resetAllSettingsButton")
+    reset_dialog = root.findChild(QObject, "resetSettingsConfirmDialog")
+    assert preview_dpi_combo is not None and reset_btn is not None and reset_dialog is not None
+    assert preview_dpi_combo.property("currentText") == "100"
+    vm2.namingRule = "TempChanged_{seq:02d}"
+    reset_dialog.accept()
+    assert vm2.namingRule == "Scan_{date}_{time}_{seq:03d}"
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
 
 
 

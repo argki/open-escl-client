@@ -7,7 +7,7 @@ import QtQuick.Layouts
 // ----------------------------------------------------------------------------
 // 配置要素:
 //   - 左側: 現在のステータスメッセージ表示 + 保存済みファイル数/最新ファイル表示
-//   - 右側: キャンセル、マルチページPDF確定、「高速プレビュー」、「スキャンして保存」ボタン
+//   - 右側: キャンセル、マルチページPDF確定、「プレビュー」、「スキャンして保存」ボタン
 // ============================================================================
 Rectangle {
     id: toolbarRoot
@@ -89,13 +89,13 @@ Rectangle {
             }
         }
 
-        // 高速プレビュー実行ボタン
+        // プレビュー実行ボタン
         Button {
             id: previewButton
             objectName: "previewButton"
             text: viewModel
-                  ? ("高速プレビュー (" + viewModel.previewDpi + " dpi)")
-                  : "高速プレビュー (低解像度)"
+                  ? ("プレビュー (" + viewModel.selectedPreviewDpi + " dpi)")
+                  : "プレビュー"
             enabled: viewModel ? !viewModel.isBusy : true
             Layout.preferredHeight: 40
             Layout.preferredWidth: 205

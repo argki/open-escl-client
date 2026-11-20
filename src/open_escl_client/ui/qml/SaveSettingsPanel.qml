@@ -81,7 +81,7 @@ GroupBox {
             objectName: "namingRuleField"
             Layout.fillWidth: true
             text: viewModel ? viewModel.namingRule : ""
-            placeholderText: "Scan_{date}_{seq:03d}"
+            placeholderText: "Scan_{date}_{time}_{seq:03d}"
             onTextEdited: {
                 if (viewModel) {
                     viewModel.namingRule = text

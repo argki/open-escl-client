@@ -218,25 +218,46 @@ class AppViewModel(QObject):
         self._scanners: list[str] = ["スキャナ未検出（「スキャナを再検索」またはIP指定）"]
         self._selected_scanner: str = self._scanners[0]
 
+        self._preferred_input_source: str = loaded_cfg.input_source
+        self._preferred_paper_size_code: str = loaded_cfg.paper_size_code
+
         self._input_sources: list[str] = [INPUT_SOURCE_LABELS[InputSourceKind.PLATEN]]
-        self._selected_input_source: str = self._input_sources[0]
+        self._selected_input_source: str = (
+            loaded_cfg.input_source
+            if loaded_cfg.input_source in self._input_sources
+            else self._input_sources[0]
+        )
 
         initial_paper_options = self._paper_size_resolver.resolve_for_source(DEFAULT_PLATEN_CAPS)
         self._paper_options_by_label: dict[str, PaperSizeOption] = {
             opt.display_label: opt for opt in initial_paper_options
         }
         self._paper_sizes: list[str] = [opt.display_label for opt in initial_paper_options]
+        saved_paper = next(
+            (
+                opt.display_label
+                for opt in initial_paper_options
+                if opt.code == loaded_cfg.paper_size_code
+            ),
+            None,
+        )
         a4_default = next(
             (opt.display_label for opt in initial_paper_options if opt.code in ("A4", "A4_LANDSCAPE")),
             self._paper_sizes[0],
         )
-        self._selected_paper_size: str = a4_default
+        self._selected_paper_size: str = saved_paper or a4_default
 
         self._resolutions: list[int] = list(DEFAULT_PLATEN_CAPS.resolutions)
         self._selected_resolution: int = (
             loaded_cfg.resolution_dpi
             if loaded_cfg.resolution_dpi in self._resolutions
             else (300 if 300 in self._resolutions else self._resolutions[0])
+        )
+        self._preview_dpi_choices: list[int] = [
+            d for d in self._resolutions if 50 <= d <= 600
+        ] or list(self._resolutions)
+        self._selected_preview_dpi: int = select_preview_dpi(
+            self._preview_dpi_choices, preferred_dpi=loaded_cfg.preview_dpi
         )
 
         self._save_formats: list[str] = ["PDF", "JPEG", "PNG"]
@@ -255,14 +276,18 @@ class AppViewModel(QObject):
         self._preview_image_url: str = ""
         self._preview_zoom: float = 1.0
 
-        self._auto_crop_enabled: bool = True
-        self._multi_document_enabled: bool = True
-        self._auto_orientation_enabled: bool = True
-        self._detection_preset: DetectionPreset = "auto"
+        self._auto_crop_enabled: bool = loaded_cfg.auto_crop_enabled
+        self._multi_document_enabled: bool = loaded_cfg.multi_document_enabled
+        self._auto_orientation_enabled: bool = loaded_cfg.auto_orientation_enabled
+        self._detection_preset: DetectionPreset = normalize_detection_preset(
+            loaded_cfg.detection_preset
+        )
         self._resolved_detection_preset: ResolvedDetectionPreset = "receipt_multi"
-        self._aspect_ratio_preset: AspectRatioPreset = "auto"
-        self._detection_sensitivity: int = 0
-        self._crop_margin_mm: float = 0.0
+        self._aspect_ratio_preset: AspectRatioPreset = normalize_aspect_ratio_preset(
+            loaded_cfg.aspect_ratio_preset
+        )
+        self._detection_sensitivity: int = loaded_cfg.detection_sensitivity
+        self._crop_margin_mm: float = loaded_cfg.crop_margin_mm
         self._crop_boxes: list[RotatedCropBox] = []
         self._crop_sensitivities: list[int] = []
         self._crop_aspect_ratios: list[AspectRatioPreset] = []
@@ -272,9 +297,9 @@ class AppViewModel(QObject):
         self._last_scan_pipeline: MultiCropScanPipeline | None = None
 
         self._bleed_through_remover = BleedThroughRemover()
-        self._bleed_through_enabled: bool = False
-        self._bleed_through_strength: float = 0.6
-        self._bleed_through_whiten_background: bool = False
+        self._bleed_through_enabled: bool = loaded_cfg.bleed_through_enabled
+        self._bleed_through_strength: float = loaded_cfg.bleed_through_strength
+        self._bleed_through_whiten_background: bool = loaded_cfg.bleed_through_whiten_background
 
         self._continuous_session: ContinuousScanSession | None = None
         self._saved_file_count: int = 0
@@ -297,14 +322,29 @@ class AppViewModel(QObject):
         if self._config_store is None:
             return
         scanner = self._discovered_by_label.get(self._selected_scanner)
+        paper_opt = self.current_paper_size_option
+        paper_code = paper_opt.code if paper_opt is not None else self._preferred_paper_size_code
         cfg = UserConfig(
             save_directory=self._save_directory,
             naming_rule=self._naming_rule,
             save_format=self._selected_save_format,
             resolution_dpi=self._selected_resolution,
+            preview_dpi=self._selected_preview_dpi,
             jpeg_quality=self._jpeg_quality,
             multipage_pdf=self._multipage_pdf,
             last_scanner_url=scanner.base_url if scanner is not None else "",
+            input_source=self._preferred_input_source or self._selected_input_source,
+            paper_size_code=paper_code,
+            auto_crop_enabled=self._auto_crop_enabled,
+            multi_document_enabled=self._multi_document_enabled,
+            auto_orientation_enabled=self._auto_orientation_enabled,
+            detection_preset=self._detection_preset,
+            detection_sensitivity=self._detection_sensitivity,
+            aspect_ratio_preset=self._aspect_ratio_preset,
+            crop_margin_mm=self._crop_margin_mm,
+            bleed_through_enabled=self._bleed_through_enabled,
+            bleed_through_strength=self._bleed_through_strength,
+            bleed_through_whiten_background=self._bleed_through_whiten_background,
         )
         try:
             self._config_store.save(cfg)
@@ -357,8 +397,10 @@ class AppViewModel(QObject):
     def selectedInputSource(self, value: str) -> None:
         if self._selected_input_source != value and value in self._source_caps_by_label:
             self._selected_input_source = value
+            self._preferred_input_source = value
             self.inputSourceChanged.emit()
             self._apply_source_capabilities(self._source_caps_by_label[value])
+            self._persist_config()
 
     @Property("QStringList", notify=paperSizeChanged)
     def paperSizes(self) -> list[str]:
@@ -372,7 +414,11 @@ class AppViewModel(QObject):
     def selectedPaperSize(self, value: str) -> None:
         if self._selected_paper_size != value:
             self._selected_paper_size = value
+            opt = self._paper_options_by_label.get(value)
+            if opt is not None:
+                self._preferred_paper_size_code = opt.code
             self.paperSizeChanged.emit()
+            self._persist_config()
 
     @Property("QVariantMap", notify=paperSizeChanged)
     def currentPlacementGuide(self) -> dict[str, object]:
@@ -527,7 +573,25 @@ class AppViewModel(QObject):
         if self._preview_session is not None:
             return self._preview_session.preview_dpi
         active_caps = self._source_caps_by_label.get(self._selected_input_source, DEFAULT_PLATEN_CAPS)
-        return select_preview_dpi(active_caps.resolutions)
+        return select_preview_dpi(
+            active_caps.resolutions, preferred_dpi=self._selected_preview_dpi
+        )
+
+    @Property("QVariantList", notify=previewChanged)
+    def previewDpiChoices(self) -> list[int]:
+        return self._preview_dpi_choices
+
+    @Property(int, notify=previewChanged)
+    def selectedPreviewDpi(self) -> int:
+        return self._selected_preview_dpi
+
+    @selectedPreviewDpi.setter
+    def selectedPreviewDpi(self, value: int) -> None:
+        clamped = max(50, min(600, int(value)))
+        if self._selected_preview_dpi != clamped:
+            self._selected_preview_dpi = clamped
+            self.previewChanged.emit()
+            self._persist_config()
 
     @Property(float, notify=previewZoomChanged)
     def previewZoom(self) -> float:
@@ -555,6 +619,7 @@ class AppViewModel(QObject):
         if self._auto_crop_enabled != flag:
             self._auto_crop_enabled = flag
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._preview_bgr is not None:
                 self._analyze_preview_crops()
 
@@ -568,6 +633,7 @@ class AppViewModel(QObject):
         if self._multi_document_enabled != flag:
             self._multi_document_enabled = flag
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._preview_bgr is not None and self._auto_crop_enabled:
                 self._analyze_preview_crops()
 
@@ -581,6 +647,7 @@ class AppViewModel(QObject):
         if self._auto_orientation_enabled != flag:
             self._auto_orientation_enabled = flag
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._preview_bgr is not None and self._auto_crop_enabled:
                 self._analyze_preview_crops()
 
@@ -602,6 +669,7 @@ class AppViewModel(QObject):
         if self._detection_preset != preset:
             self._detection_preset = preset
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._preview_bgr is not None and self._auto_crop_enabled:
                 self._analyze_preview_crops()
 
@@ -615,6 +683,7 @@ class AppViewModel(QObject):
         if self._detection_preset != preset:
             self._detection_preset = preset
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._preview_bgr is not None and self._auto_crop_enabled:
                 self._analyze_preview_crops()
 
@@ -641,6 +710,7 @@ class AppViewModel(QObject):
         if self._detection_sensitivity != clamped:
             self._detection_sensitivity = clamped
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._auto_crop_enabled and self._preview_bgr is not None:
                 self._analyze_preview_crops()
 
@@ -677,6 +747,7 @@ class AppViewModel(QObject):
         if self._aspect_ratio_preset != preset:
             self._aspect_ratio_preset = preset
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._auto_crop_enabled and self._preview_bgr is not None:
                 self._analyze_preview_crops()
 
@@ -715,6 +786,7 @@ class AppViewModel(QObject):
         if self._bleed_through_enabled != enabled:
             self._bleed_through_enabled = enabled
             self.cropSettingsChanged.emit()
+            self._persist_config()
             self._refresh_bleed_through_preview()
 
     @Property(float, notify=cropSettingsChanged)
@@ -727,6 +799,7 @@ class AppViewModel(QObject):
         if abs(self._bleed_through_strength - clamped) > 1e-6:
             self._bleed_through_strength = clamped
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._bleed_through_enabled:
                 self._refresh_bleed_through_preview()
 
@@ -740,6 +813,7 @@ class AppViewModel(QObject):
         if self._bleed_through_whiten_background != whiten:
             self._bleed_through_whiten_background = whiten
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._bleed_through_enabled:
                 self._refresh_bleed_through_preview()
 
@@ -753,6 +827,7 @@ class AppViewModel(QObject):
         if abs(self._crop_margin_mm - clamped) > 1e-6:
             self._crop_margin_mm = clamped
             self.cropSettingsChanged.emit()
+            self._persist_config()
             if self._crop_boxes:
                 self._crop_boxes = [
                     box.with_uniform_margin(clamped, unit="mm") for box in self._crop_boxes
@@ -862,9 +937,7 @@ class AppViewModel(QObject):
             return
         if self._bleed_through_enabled:
             filtered = self._maybe_apply_bleed_through(self._preview_bgr)
-            url = self._image_provider.update_image_bytes(
-                encode_image_bytes(filtered, fmt="JPEG", quality=92)
-            )
+            url = self._image_provider.update_image_bgr(filtered)
         else:
             url = self._image_provider.update_image_bytes(self._preview_session.image_bytes)
         self._preview_image_url = url
@@ -1172,7 +1245,7 @@ class AppViewModel(QObject):
 
     @Slot()
     def zoomInPreview(self) -> None:
-        self._preview_zoom = min(4.0, round(self._preview_zoom + 0.25, 2))
+        self._preview_zoom = min(8.0, round(self._preview_zoom + 0.25, 2))
         self.previewZoomChanged.emit()
 
     @Slot()
@@ -1204,7 +1277,9 @@ class AppViewModel(QObject):
 
         self._source_caps_by_label = source_map
         self._input_sources = list(source_map.keys())
-        if self._selected_input_source not in self._source_caps_by_label:
+        if self._preferred_input_source in self._source_caps_by_label:
+            self._selected_input_source = self._preferred_input_source
+        elif self._selected_input_source not in self._source_caps_by_label:
             self._selected_input_source = self._input_sources[0]
         self.inputSourceChanged.emit()
 
@@ -1217,9 +1292,19 @@ class AppViewModel(QObject):
         self._paper_options_by_label = {opt.display_label: opt for opt in paper_options}
         new_paper_labels = [opt.display_label for opt in paper_options]
 
+        preferred_label = next(
+            (
+                opt.display_label
+                for opt in paper_options
+                if opt.code == self._preferred_paper_size_code
+            ),
+            None,
+        )
         prev_paper = self._selected_paper_size
         self._paper_sizes = new_paper_labels
-        if prev_paper in self._paper_options_by_label:
+        if preferred_label is not None:
+            self._selected_paper_size = preferred_label
+        elif prev_paper in self._paper_options_by_label:
             self._selected_paper_size = prev_paper
         else:
             a4_label = next(
@@ -1238,8 +1323,67 @@ class AppViewModel(QObject):
             self._selected_resolution = 300
         else:
             self._selected_resolution = new_resolutions[0]
+
+        preview_choices = [d for d in new_resolutions if 50 <= d <= 600] or list(new_resolutions)
+        self._preview_dpi_choices = preview_choices
+        self._selected_preview_dpi = select_preview_dpi(
+            preview_choices, preferred_dpi=self._selected_preview_dpi
+        )
         self.resolutionChanged.emit()
         self.previewChanged.emit()
+
+    @Slot()
+    def resetAllSettingsToDefaults(self) -> None:
+        """Reset all user preferences to defaults, persist, and refresh preview/UI state."""
+        defaults = (
+            self._config_store.reset() if self._config_store is not None else UserConfig.defaults()
+        )
+        self._preferred_input_source = defaults.input_source
+        self._preferred_paper_size_code = defaults.paper_size_code
+        self._selected_preview_dpi = defaults.preview_dpi
+
+        self._selected_save_format = normalize_save_format(defaults.save_format)
+        self._save_directory = defaults.save_directory
+        self._naming_rule = defaults.naming_rule
+        self._jpeg_quality = defaults.jpeg_quality
+        self._multipage_pdf = defaults.multipage_pdf
+
+        self._auto_crop_enabled = defaults.auto_crop_enabled
+        self._multi_document_enabled = defaults.multi_document_enabled
+        self._auto_orientation_enabled = defaults.auto_orientation_enabled
+        self._detection_preset = normalize_detection_preset(defaults.detection_preset)
+        self._detection_sensitivity = defaults.detection_sensitivity
+        self._aspect_ratio_preset = normalize_aspect_ratio_preset(defaults.aspect_ratio_preset)
+        self._crop_margin_mm = defaults.crop_margin_mm
+
+        self._bleed_through_enabled = defaults.bleed_through_enabled
+        self._bleed_through_strength = defaults.bleed_through_strength
+        self._bleed_through_whiten_background = defaults.bleed_through_whiten_background
+
+        if self._input_sources:
+            self._selected_input_source = self._input_sources[0]
+        self.inputSourceChanged.emit()
+
+        active_caps = self._source_caps_by_label.get(
+            self._selected_input_source, DEFAULT_PLATEN_CAPS
+        )
+        self._selected_resolution = defaults.resolution_dpi
+        self._selected_paper_size = ""
+        self._apply_source_capabilities(active_caps)
+
+        self.saveFormatChanged.emit()
+        self.saveDirectoryChanged.emit()
+        self.namingRuleChanged.emit()
+        self.jpegQualityChanged.emit()
+        self.multipagePdfChanged.emit()
+        self.cropSettingsChanged.emit()
+        self._refresh_next_filename_preview()
+
+        if self._preview_bgr is not None:
+            self._refresh_bleed_through_preview()
+            self._analyze_preview_crops()
+
+        self.set_status_message("すべての設定を初期状態にリセットしました")
 
     def _load_capabilities_for_selected_scanner(self) -> None:
         scanner = self._discovered_by_label.get(self._selected_scanner)
@@ -1320,14 +1464,13 @@ class AppViewModel(QObject):
             self.set_status_message("プレビュースキャンをキャンセルしました")
             return
         try:
-            url = self._image_provider.update_image_bytes(session_obj.image_bytes)
             self._preview_session = session_obj
             self._preview_bgr = decode_image_bytes(session_obj.image_bytes)
             if self._bleed_through_enabled and self._preview_bgr is not None:
                 filtered = self._maybe_apply_bleed_through(self._preview_bgr)
-                url = self._image_provider.update_image_bytes(
-                    encode_image_bytes(filtered, fmt="JPEG", quality=92)
-                )
+                url = self._image_provider.update_image_bgr(filtered)
+            else:
+                url = self._image_provider.update_image_bytes(session_obj.image_bytes)
             self._preview_image_url = url
             self._preview_zoom = 1.0
             self.previewZoomChanged.emit()
@@ -1377,18 +1520,22 @@ class AppViewModel(QObject):
         if paper_opt is None:
             paper_opt = self._paper_size_resolver.resolve_for_source(active_caps)[0]
 
-        preview_dpi = select_preview_dpi(active_caps.resolutions)
+        preview_dpi = select_preview_dpi(
+            active_caps.resolutions, preferred_dpi=self._selected_preview_dpi
+        )
         self._cancel_requested = False
         self._set_busy(True)
         self.set_status_message(
-            f"低解像度プレビュースキャン中 ({preview_dpi} dpi / {paper_opt.name} {paper_opt.orientation_label})..."
+            f"プレビュースキャン中 ({preview_dpi} dpi / {paper_opt.name} {paper_opt.orientation_label})..."
         )
 
         base_url = scanner.base_url
 
         def _worker() -> None:
             try:
-                session = self._preview_service.execute_preview(base_url, active_caps, paper_opt)
+                session = self._preview_service.execute_preview(
+                    base_url, active_caps, paper_opt, preview_dpi=preview_dpi
+                )
                 self._previewFinishedInternal.emit(session)
             except Exception as exc:
                 self._previewFailedInternal.emit(str(exc))

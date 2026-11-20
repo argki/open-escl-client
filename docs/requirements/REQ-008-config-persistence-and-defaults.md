@@ -1,6 +1,6 @@
 # REQ-008: 設定の永続化・初期化リセット・プレビュー解像度指定とデフォルト値見直し
 
-- **ステータス**: `未着手`
+- **ステータス**: `完了`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-001`](./REQ-001-project-foundation-and-declarative-ui.md), [`REQ-003`](./REQ-003-fast-preview-scan.md), [`REQ-007`](./REQ-007-bleed-through-removal.md)
@@ -29,10 +29,10 @@
 
 ## 3. 完了条件（Acceptance Criteria）
 
-- [ ] 給紙元・用紙サイズ・DPI・プレビューDPI・トリミング設定・裏写り設定を変更して再起動した際、前回の状態がそのまま復元されること
-- [ ] 「初期状態にリセット」操作で全設定が既定値（ネーミングルール `{time}` 含む、裏写り除去・背景白化とも ON）に戻り、永続化ファイルも更新されること
-- [ ] 高速プレビュー解像度を UI で変更し、指定した DPI でプレビューが実行されること
-- [ ] Brother × macOS 環境（またはモック検証）で意図通り動作すること
+- [x] 給紙元・用紙サイズ・DPI・プレビューDPI・トリミング設定・裏写り設定を変更して再起動した際、前回の状態がそのまま復元されること
+- [x] 「初期状態にリセット」操作で全設定が既定値（ネーミングルール `{time}` 含む、裏写り除去・背景白化とも ON）に戻り、永続化ファイルも更新されること
+- [x] 高速プレビュー解像度を UI で変更し、指定した DPI でプレビューが実行されること
+- [x] Brother × macOS 環境（またはモック検証）で意図通り動作すること
 - [ ] Windows や汎用 eSCL 機器への将来対応を阻害するハードコードが含まれていないこと
 
 ---
@@ -49,7 +49,7 @@ feature/config-persistence-and-defaults
 
 ### タスク 1: `UserConfig` の永続化項目拡張と既定値（`{time}`・裏写りON）の見直し
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/config/user_config.py` の `UserConfig` に給紙元・用紙サイズ・プレビュー DPI・トリミング関連設定（自動トリミング、複数分割、自動向き、検出パターン、検出感度、検出比率、余白 mm）・裏写り除去設定（有効、強度、背景白化）・ウィンドウ状態等を追加し、`to_dict` / `from_dict` / `reset_to_defaults` を実装する
   - `src/open_escl_client/core/naming.py` の `DEFAULT_NAMING_TEMPLATE` および `UserConfig.naming_rule` のデフォルト値を `Scan_{date}_{time}_{seq:03d}` に変更する
@@ -77,7 +77,7 @@ feat(config): 設定永続化項目を拡張しネーミングルール既定値
 
 ### タスク 2: `AppViewModel` と `PreviewScanService` への全設定保存・復元およびプレビュー解像度指定の統合
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/core/preview_service.py` に、ユーザー指定の希望プレビュー DPI をスキャナの `supported_resolutions` と照合して決定する解決ロジックを追加する
   - `src/open_escl_client/ui/viewmodel.py` の起動時ロード・各プロパティ変更時の自動保存・`resetAllSettingsToDefaults()` スロットを実装する（接続先スキャナ能力取得後にも保存済み用紙サイズ・給紙元を優先復元する）
@@ -104,7 +104,7 @@ UI上で変更したすべてのスキャン・補正設定を即座に永続化
 
 ### タスク 3: 高速プレビュー解像度選択および設定初期化リセットの QML UI 実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/qml/ScannerSidebar.qml` の「2. 読み取り設定」内に「高速プレビュー解像度 (DPI)」コンボボックス（`previewDpiCombo`）を追加する
   - `ScannerSidebar.qml` またはフッター近辺に「設定を初期状態にリセット」ボタンと誤操作防止の確認ダイアログ（`Dialog`）を追加し、`viewModel.resetAllSettingsToDefaults()` を呼び出す

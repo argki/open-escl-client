@@ -30,6 +30,41 @@ def test_select_preview_dpi_chooses_lowest_in_75_to_150_range() -> None:
     assert select_preview_dpi((75, 100, 150, 300, 600)) == 75
     # Scanner whose lowest is 200 dpi -> falls back to 200 dpi
     assert select_preview_dpi((200, 300, 600)) == 200
+    # Explicit preferred DPI picks exact match or closest supported DPI
+    assert select_preview_dpi((100, 150, 200, 300), preferred_dpi=150) == 150
+    assert select_preview_dpi((100, 200, 300), preferred_dpi=140) == 100
+
+
+def test_preview_scan_service_honors_explicit_preview_dpi() -> None:
+    sample_jpeg = _create_sample_jpeg(1240, 1754)
+    platen_caps = InputSourceCaps(
+        source=InputSourceKind.PLATEN,
+        max_width=3508,
+        max_height=5100,
+        resolutions=(100, 150, 200, 300),
+        color_modes=("RGB24",),
+    )
+    a4_option = PaperSizeOption(
+        code="A4_LANDSCAPE",
+        name="A4",
+        width_mm=297.0,
+        height_mm=210.0,
+        width_units=2480,
+        height_units=3508,
+        orientation=PaperOrientation.LANDSCAPE,
+    )
+    mock_scan_client = MagicMock()
+    mock_scan_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=sample_jpeg,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+    service = PreviewScanService(scan_client_factory=lambda _url: mock_scan_client)
+    session = service.execute_preview(
+        "http://192.168.1.50:80/eSCL", platen_caps, a4_option, preview_dpi=150
+    )
+    assert session.preview_dpi == 150
 
 
 def test_preview_scan_service_executes_at_low_dpi_and_creates_session() -> None:

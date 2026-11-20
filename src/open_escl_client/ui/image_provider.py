@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize
+import cv2
+import numpy as np
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QImageReader
 from PySide6.QtQuick import QQuickImageProvider
 
@@ -59,6 +61,19 @@ class PreviewImageProvider(QQuickImageProvider):
         self._revision += 1
         return f"image://preview/{self._revision}"
 
+    def update_image_bgr(self, bgr: np.ndarray) -> str:
+        """Load an in-memory BGR ndarray directly into `QImage` without JPEG re-compression."""
+        if bgr.size == 0 or bgr.ndim != 3 or bgr.shape[2] != 3:
+            raise ValueError("スキャン画像配列が不正です")
+        rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        h, w = rgb.shape[:2]
+        qimg = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
+        if qimg.isNull():
+            raise ValueError("プレビュー画像の変換に失敗しました")
+        self._current_image = qimg
+        self._revision += 1
+        return f"image://preview/{self._revision}"
+
     def set_crop_thumbnail(self, index: int, image_bytes: bytes) -> str:
         """Store a single cropped/deskewed thumbnail for 1-based `index` and return its URL."""
         loaded = _decode_qimage_with_exif(image_bytes)
@@ -101,5 +116,9 @@ class PreviewImageProvider(QQuickImageProvider):
             size.setWidth(img.width())
             size.setHeight(img.height())
         if requested_size.isValid() and requested_size.width() > 0 and requested_size.height() > 0:
-            return img.scaled(requested_size)
+            return img.scaled(
+                requested_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         return img

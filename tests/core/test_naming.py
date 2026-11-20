@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from open_escl_client.core.naming import (
+    DEFAULT_NAMING_TEMPLATE,
     FileNamingEngine,
     normalize_extension,
     sanitize_filename_stem,
@@ -17,6 +18,11 @@ FIXED_NOW = datetime(2026, 11, 18, 8, 5, 9)
 def test_render_filename_with_date_time_and_sequence_tokens() -> None:
     engine = FileNamingEngine()
 
+    assert DEFAULT_NAMING_TEMPLATE == "Scan_{date}_{time}_{seq:03d}"
+    assert (
+        engine.render_filename(DEFAULT_NAMING_TEMPLATE, seq=1, file_format="PDF", now=FIXED_NOW)
+        == "Scan_20261118_080509_001.pdf"
+    )
     assert (
         engine.render_filename("Scan_{date}_{seq:03d}", seq=1, file_format="PDF", now=FIXED_NOW)
         == "Scan_20261118_001.pdf"
@@ -43,9 +49,9 @@ def test_render_filename_sanitizes_illegal_chars_and_handles_invalid_template() 
     assert normalize_extension("JPEG") == ".jpg"
     assert normalize_extension(".PNG") == ".png"
 
-    # Incomplete brace while user is typing falls back safely without crashing
+    # Incomplete brace while user is typing falls back safely to default template without crashing
     fallback = engine.render_filename("Scan_{date_{seq", seq=2, file_format="PDF", now=FIXED_NOW)
-    assert fallback == "Scan_20261118_002.pdf"
+    assert fallback == "Scan_20261118_080509_002.pdf"
 
     # Template already ending with .pdf does not produce .pdf.pdf
     no_double_ext = engine.render_filename("Doc_{seq:02d}.pdf", seq=3, file_format="PDF", now=FIXED_NOW)

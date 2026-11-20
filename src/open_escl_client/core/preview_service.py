@@ -20,15 +20,22 @@ from open_escl_client.escl.scan_client import EsclScanClient, EsclScanRequest, E
 def select_preview_dpi(
     supported_resolutions: Sequence[int],
     *,
+    preferred_dpi: int | None = None,
     min_preferred_dpi: int = 75,
     max_preferred_dpi: int = 150,
 ) -> int:
-    """Select the fastest low resolution (75-150 DPI preferred) supported by the scanner."""
+    """Select the preview DPI from `supported_resolutions` (honoring `preferred_dpi` when set)."""
     if not supported_resolutions:
-        return 100
-    sorted_dpis = sorted(int(d) for d in supported_resolutions if int(d) > 0)
+        return int(preferred_dpi) if preferred_dpi and preferred_dpi > 0 else 100
+    sorted_dpis = sorted({int(d) for d in supported_resolutions if int(d) > 0})
     if not sorted_dpis:
-        return 100
+        return int(preferred_dpi) if preferred_dpi and preferred_dpi > 0 else 100
+
+    if preferred_dpi is not None and preferred_dpi > 0:
+        pref = int(preferred_dpi)
+        if pref in sorted_dpis:
+            return pref
+        return min(sorted_dpis, key=lambda d: (abs(d - pref), d))
 
     for dpi in sorted_dpis:
         if min_preferred_dpi <= dpi <= max_preferred_dpi:
@@ -90,17 +97,18 @@ class PreviewScanService:
         source_caps: InputSourceCaps,
         paper_size: PaperSizeOption,
         *,
+        preview_dpi: int | None = None,
         color_mode: str = "RGB24",
     ) -> EsclScanRequest:
-        """Construct an `EsclScanRequest` using the lowest suitable preview DPI."""
-        preview_dpi = select_preview_dpi(source_caps.resolutions)
+        """Construct an `EsclScanRequest` using `preview_dpi` or the lowest suitable preview DPI."""
+        chosen_dpi = select_preview_dpi(source_caps.resolutions, preferred_dpi=preview_dpi)
         chosen_color = color_mode if color_mode in source_caps.color_modes else source_caps.color_modes[0]
         return EsclScanRequest(
             width_units=paper_size.width_units,
             height_units=paper_size.height_units,
             x_offset_units=0,
             y_offset_units=0,
-            resolution_dpi=preview_dpi,
+            resolution_dpi=chosen_dpi,
             input_source=source_caps.source,
             color_mode=chosen_color,
             document_format="image/jpeg",
@@ -112,10 +120,16 @@ class PreviewScanService:
         source_caps: InputSourceCaps,
         paper_size: PaperSizeOption,
         *,
+        preview_dpi: int | None = None,
         color_mode: str = "RGB24",
     ) -> PreviewSession:
         """Execute a low-DPI preview scan against `base_url` and return a `PreviewSession`."""
-        request = self.build_preview_request(source_caps, paper_size, color_mode=color_mode)
+        request = self.build_preview_request(
+            source_caps,
+            paper_size,
+            preview_dpi=preview_dpi,
+            color_mode=color_mode,
+        )
         client = self._scan_client_factory(base_url)
         scan_result: EsclScanResult = client.scan_single_page(request)
         width_px, height_px = _extract_image_dimensions(scan_result.image_bytes)

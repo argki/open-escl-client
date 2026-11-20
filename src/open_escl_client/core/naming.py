@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
-import re
 from string import Formatter
 
-DEFAULT_NAMING_TEMPLATE = "Scan_{date}_{seq:03d}"
+DEFAULT_NAMING_TEMPLATE = "Scan_{date}_{time}_{seq:03d}"
 
 _INVALID_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _FORMAT_TO_EXTENSION: dict[str, str] = {
