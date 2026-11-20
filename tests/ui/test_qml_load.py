@@ -1281,6 +1281,89 @@ def test_crop_drag_session_defers_thumbnail_rebuild_and_supports_aspect_ratio_lo
     engine.deleteLater()
 
 
+def test_sidebar_panels_fit_within_groupbox_and_zoom_centers_on_pointer() -> None:
+    """Sidebar GroupBox panels never overflow horizontally and wheel zoom keeps pointer fixed."""
+    import numpy as np
+    import pytest
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:450] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+
+    engine, _ = create_qml_engine(vm)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+
+    panel_names = (
+        "scannerSelectPanel",
+        "scanSettingsPanel",
+        "cropSettingsPanel",
+        "bleedThroughPanel",
+        "saveSettingsPanel",
+    )
+    for win_w in (1180, 920):
+        root.setProperty("width", win_w)
+        QCoreApplication.processEvents()
+        for name in panel_names:
+            gb = root.findChild(QObject, name)
+            assert gb is not None
+            avail = float(gb.property("availableWidth"))
+            col = gb.property("contentItem").childItems()[0]
+            assert float(col.property("width")) <= avail + 0.5
+            for child in col.childItems():
+                right = float(child.property("x")) + float(child.property("width"))
+                assert right <= avail + 0.5, f"{name} child overflowed at w={win_w}"
+
+    # Verify zoomAroundViewportPoint preserves target point near bottom-right instead of (0, 0)
+    preview_area = root.findChild(QObject, "previewArea")
+    flickable = root.findChild(QObject, "previewFlickable")
+    assert preview_area is not None and flickable is not None
+    vw = float(flickable.property("width"))
+    vh = float(flickable.property("height"))
+    vx, vy = vw * 0.8, vh * 0.75
+
+    preview_area.zoomAroundViewportPoint(True, vx, vy)
+    QCoreApplication.processEvents()
+    assert vm.previewZoom == pytest.approx(1.25, abs=1e-6)
+    cx = float(flickable.property("contentX"))
+    cy = float(flickable.property("contentY"))
+    assert cx == pytest.approx(vw * 0.25 * 0.8, abs=1.0)
+    assert cy == pytest.approx(vh * 0.25 * 0.75, abs=1.0)
+
+    preview_area.zoomAroundViewportPoint(False, vx, vy)
+    QCoreApplication.processEvents()
+    assert vm.previewZoom == pytest.approx(1.0, abs=1e-6)
+    assert float(flickable.property("contentX")) == pytest.approx(0.0, abs=1.0)
+    assert float(flickable.property("contentY")) == pytest.approx(0.0, abs=1.0)
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+
 
 
 

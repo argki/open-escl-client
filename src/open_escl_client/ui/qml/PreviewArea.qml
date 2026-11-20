@@ -15,6 +15,58 @@ Rectangle {
     objectName: "previewArea"
     color: "#E5E7EB"
 
+    function zoomAroundViewportPoint(zoomIn, vx, vy) {
+        if (!viewModel || !viewModel.hasPreview) {
+            return
+        }
+        var vw = previewFlickable.width
+        var vh = previewFlickable.height
+        if (vw <= 0 || vh <= 0) {
+            if (zoomIn) {
+                viewModel.zoomInPreview()
+            } else {
+                viewModel.zoomOutPreview()
+            }
+            return
+        }
+
+        var oldZoom = viewModel.previewZoom
+        var oldImgW = vw * oldZoom
+        var oldImgH = vh * oldZoom
+        var oldContentW = Math.max(vw, oldImgW)
+        var oldContentH = Math.max(vh, oldImgH)
+        var oldImgX = Math.max(0, (oldContentW - oldImgW) * 0.5)
+        var oldImgY = Math.max(0, (oldContentH - oldImgH) * 0.5)
+
+        var relX = (previewFlickable.contentX + vx - oldImgX) / Math.max(1.0, oldImgW)
+        var relY = (previewFlickable.contentY + vy - oldImgY) / Math.max(1.0, oldImgH)
+
+        if (zoomIn) {
+            viewModel.zoomInPreview()
+        } else {
+            viewModel.zoomOutPreview()
+        }
+
+        var newZoom = viewModel.previewZoom
+        if (Math.abs(newZoom - oldZoom) < 1e-6) {
+            return
+        }
+        var newImgW = vw * newZoom
+        var newImgH = vh * newZoom
+        var newContentW = Math.max(vw, newImgW)
+        var newContentH = Math.max(vh, newImgH)
+        var newImgX = Math.max(0, (newContentW - newImgW) * 0.5)
+        var newImgY = Math.max(0, (newContentH - newImgH) * 0.5)
+
+        var maxContentX = Math.max(0, newContentW - vw)
+        var maxContentY = Math.max(0, newContentH - vh)
+        var targetX = Math.max(0, Math.min(maxContentX, newImgX + relX * newImgW - vx))
+        var targetY = Math.max(0, Math.min(maxContentY, newImgY + relY * newImgH - vy))
+
+        previewFlickable.contentX = targetX
+        previewFlickable.contentY = targetY
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 20
@@ -72,7 +124,7 @@ Rectangle {
                     text: "－"
                     implicitWidth: 32
                     implicitHeight: 28
-                    onClicked: if (viewModel) viewModel.zoomOutPreview()
+                    onClicked: previewRoot.zoomAroundViewportPoint(false, previewFlickable.width * 0.5, previewFlickable.height * 0.5)
                 }
 
                 Button {
@@ -80,7 +132,13 @@ Rectangle {
                     text: viewModel ? Math.round(viewModel.previewZoom * 100) + "%" : "100%"
                     implicitWidth: 58
                     implicitHeight: 28
-                    onClicked: if (viewModel) viewModel.resetPreviewZoom()
+                    onClicked: {
+                        if (viewModel) {
+                            viewModel.resetPreviewZoom()
+                            previewFlickable.contentX = 0
+                            previewFlickable.contentY = 0
+                        }
+                    }
                 }
 
                 Button {
@@ -88,7 +146,7 @@ Rectangle {
                     text: "＋"
                     implicitWidth: 32
                     implicitHeight: 28
-                    onClicked: if (viewModel) viewModel.zoomInPreview()
+                    onClicked: previewRoot.zoomAroundViewportPoint(true, previewFlickable.width * 0.5, previewFlickable.height * 0.5)
                 }
             }
         }
@@ -161,6 +219,7 @@ Rectangle {
                 WheelHandler {
                     id: previewWheelHandler
                     objectName: "previewWheelHandler"
+                    target: null
                     acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                     property real wheelAccum: 0
                     onWheel: function(event) {
@@ -171,12 +230,14 @@ Rectangle {
                         if (delta === 0) {
                             return
                         }
+                        var pointerX = (event && event.x !== undefined) ? event.x : point.position.x
+                        var pointerY = (event && event.y !== undefined) ? event.y : point.position.y
                         wheelAccum += delta
                         if (wheelAccum >= 60) {
-                            viewModel.zoomInPreview()
+                            previewRoot.zoomAroundViewportPoint(true, pointerX, pointerY)
                             wheelAccum = 0
                         } else if (wheelAccum <= -60) {
-                            viewModel.zoomOutPreview()
+                            previewRoot.zoomAroundViewportPoint(false, pointerX, pointerY)
                             wheelAccum = 0
                         }
                         event.accepted = true

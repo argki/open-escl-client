@@ -17,8 +17,9 @@ GroupBox {
         CheckBox {
             id: bleedThroughCheckBox
             objectName: "bleedThroughCheckBox"
-            text: "両面印刷の裏写り（裏透け）を軽減する"
+            text: "裏写り（裏透け）を軽減する"
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             checked: viewModel ? viewModel.bleedThroughEnabled : false
             onToggled: {
                 if (viewModel) {
@@ -29,17 +30,21 @@ GroupBox {
 
         ColumnLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             spacing: 2
             enabled: viewModel ? viewModel.bleedThroughEnabled : false
 
             RowLayout {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Label {
                     text: "除去強度"
                     font.bold: true
                     color: "#374151"
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    elide: Text.ElideRight
                 }
-                Item { Layout.fillWidth: true }
                 Label {
                     objectName: "bleedThroughStrengthValueLabel"
                     readonly property int pctVal: Math.round(bleedThroughStrengthSlider.value)
@@ -53,6 +58,7 @@ GroupBox {
                 id: bleedThroughStrengthSlider
                 objectName: "bleedThroughStrengthSlider"
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 from: 0
                 to: 100
                 stepSize: 5
@@ -76,6 +82,8 @@ GroupBox {
                 color: "#6B7280"
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.preferredWidth: 0
             }
         }
 
@@ -84,6 +92,7 @@ GroupBox {
             objectName: "bleedThroughWhitenCheckBox"
             text: "背景の紙色を白く整える"
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             enabled: viewModel ? viewModel.bleedThroughEnabled : false
             checked: viewModel ? viewModel.bleedThroughWhitenBackground : false
             onToggled: {
