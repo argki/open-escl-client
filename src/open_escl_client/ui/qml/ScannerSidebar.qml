@@ -66,46 +66,54 @@ Rectangle {
                         }
                     }
 
-                    Button {
-                        id: refreshScannerButton
-                        objectName: "refreshScannerButton"
-                        text: "スキャナを再検索 (mDNS / Bonjour)"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 0
-                        onClicked: {
-                            if (viewModel) {
-                                viewModel.refreshScanners()
-                            }
-                        }
-                    }
+                    CollapsibleSection {
+                        id: scannerConnectionDetailsSection
+                        objectName: "scannerConnectionDetailsSection"
+                        title: "接続・再検索の詳細"
+                        summaryText: "再検索 / IP直接指定"
+                        expanded: false
 
-                    // IPアドレス / URL 直接接続（mDNSが届かない環境用フォールバック）
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 0
-                        spacing: 6
-
-                        TextField {
-                            id: manualHostField
-                            objectName: "manualHostField"
+                        Button {
+                            id: refreshScannerButton
+                            objectName: "refreshScannerButton"
+                            text: "スキャナを再検索 (mDNS / Bonjour)"
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
-                            placeholderText: "IP または URL (例: 192.168.1.50)"
-                            onAccepted: {
-                                if (viewModel && text.length > 0) {
-                                    viewModel.addManualScanner(text)
+                            onClicked: {
+                                if (viewModel) {
+                                    viewModel.refreshScanners()
                                 }
                             }
                         }
 
-                        Button {
-                            id: connectManualButton
-                            objectName: "connectManualButton"
+                        // IPアドレス / URL 直接接続（mDNSが届かない環境用フォールバック）
+                        RowLayout {
+                            Layout.fillWidth: true
                             Layout.minimumWidth: 0
-                            text: "接続"
-                            onClicked: {
-                                if (viewModel && manualHostField.text.length > 0) {
-                                    viewModel.addManualScanner(manualHostField.text)
+                            spacing: 6
+
+                            TextField {
+                                id: manualHostField
+                                objectName: "manualHostField"
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                placeholderText: "IP または URL (例: 192.168.1.50)"
+                                onAccepted: {
+                                    if (viewModel && text.length > 0) {
+                                        viewModel.addManualScanner(text)
+                                    }
+                                }
+                            }
+
+                            Button {
+                                id: connectManualButton
+                                objectName: "connectManualButton"
+                                Layout.minimumWidth: 0
+                                text: "接続"
+                                onClicked: {
+                                    if (viewModel && manualHostField.text.length > 0) {
+                                        viewModel.addManualScanner(manualHostField.text)
+                                    }
                                 }
                             }
                         }

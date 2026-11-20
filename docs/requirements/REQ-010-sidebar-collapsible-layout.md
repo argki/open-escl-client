@@ -1,6 +1,6 @@
 # REQ-010: 左サイドバーの折りたたみ整理と操作頻度別グルーピング
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-007`](./REQ-007-bleed-through-removal.md), [`REQ-008`](./REQ-008-config-persistence-and-defaults.md)
@@ -50,7 +50,7 @@ feature/sidebar-collapsible-layout
 
 ### タスク 1: 汎用折りたたみコンポーネントとサイドバー各セクションの折りたたみ化実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/qml/CollapsibleSection.qml` を新規作成し、開閉アイコン（`▸` / `▾`）、タイトル、現在のサマリーテキスト（任意）を表示できる軽量な折りたたみコンテナを実装する
   - `ScannerSidebar.qml` の「スキャナを再検索・手動接続」を折りたたみ領域へ移動する
