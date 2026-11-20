@@ -222,8 +222,11 @@ class AppViewModel(QObject):
         self._scanners: list[str] = ["スキャナ未検出（「スキャナを再検索」またはIP指定）"]
         self._selected_scanner: str = self._scanners[0]
 
+        self._preferred_scanner_url: str = loaded_cfg.last_scanner_url
         self._preferred_input_source: str = loaded_cfg.input_source
         self._preferred_paper_size_code: str = loaded_cfg.paper_size_code
+        self._preferred_resolution_dpi: int = loaded_cfg.resolution_dpi
+        self._preferred_preview_dpi: int = loaded_cfg.preview_dpi
 
         self._input_sources: list[str] = [INPUT_SOURCE_LABELS[InputSourceKind.PLATEN]]
         self._selected_input_source: str = (
@@ -300,7 +303,7 @@ class AppViewModel(QObject):
         self._crop_aspect_ratios: list[AspectRatioPreset] = []
         self._crop_thumbnail_urls: dict[int, str] = {}
         self._selected_crop_index: int = -1
-        self._lock_crop_aspect_ratio: bool = False
+        self._lock_crop_aspect_ratio: bool = loaded_cfg.lock_crop_aspect_ratio
         self._dragging_crop_index: int = -1
         self._drag_locked_aspect_ratio: float | None = None
         self._preview_boxes_ready_for_save: bool = False
@@ -334,15 +337,25 @@ class AppViewModel(QObject):
         scanner = self._discovered_by_label.get(self._selected_scanner)
         paper_opt = self.current_paper_size_option
         paper_code = paper_opt.code if paper_opt is not None else self._preferred_paper_size_code
+        res_dpi = (
+            self._selected_resolution
+            if self._current_capabilities is not None
+            else self._preferred_resolution_dpi
+        )
+        prev_dpi = (
+            self._selected_preview_dpi
+            if self._current_capabilities is not None
+            else self._preferred_preview_dpi
+        )
         cfg = UserConfig(
             save_directory=self._save_directory,
             naming_rule=self._naming_rule,
             save_format=self._selected_save_format,
-            resolution_dpi=self._selected_resolution,
-            preview_dpi=self._selected_preview_dpi,
+            resolution_dpi=res_dpi,
+            preview_dpi=prev_dpi,
             jpeg_quality=self._jpeg_quality,
             multipage_pdf=self._multipage_pdf,
-            last_scanner_url=scanner.base_url if scanner is not None else "",
+            last_scanner_url=scanner.base_url if scanner is not None else self._preferred_scanner_url,
             input_source=self._preferred_input_source or self._selected_input_source,
             paper_size_code=paper_code,
             auto_crop_enabled=self._auto_crop_enabled,
@@ -351,6 +364,7 @@ class AppViewModel(QObject):
             detection_preset=self._detection_preset,
             detection_sensitivity=self._detection_sensitivity,
             aspect_ratio_preset=self._aspect_ratio_preset,
+            lock_crop_aspect_ratio=self._lock_crop_aspect_ratio,
             crop_margin_mm=self._crop_margin_mm,
             bleed_through_enabled=self._bleed_through_enabled,
             bleed_through_strength=self._bleed_through_strength,
@@ -457,8 +471,9 @@ class AppViewModel(QObject):
     @selectedResolution.setter
     def selectedResolution(self, value: int) -> None:
         int_val = int(value)
-        if self._selected_resolution != int_val:
+        if self._selected_resolution != int_val or self._preferred_resolution_dpi != int_val:
             self._selected_resolution = int_val
+            self._preferred_resolution_dpi = int_val
             self.resolutionChanged.emit()
             self._persist_config()
 
@@ -617,8 +632,9 @@ class AppViewModel(QObject):
     @selectedPreviewDpi.setter
     def selectedPreviewDpi(self, value: int) -> None:
         clamped = max(50, min(600, int(value)))
-        if self._selected_preview_dpi != clamped:
+        if self._selected_preview_dpi != clamped or self._preferred_preview_dpi != clamped:
             self._selected_preview_dpi = clamped
+            self._preferred_preview_dpi = clamped
             self.previewChanged.emit()
             self._persist_config()
 
@@ -776,6 +792,10 @@ class AppViewModel(QObject):
                     else self._detection_sensitivity
                 )
                 self._redetect_single_crop_at(self._selected_crop_index, sens, preset)
+            if self._aspect_ratio_preset != preset:
+                self._aspect_ratio_preset = preset
+                self.cropSettingsChanged.emit()
+                self._persist_config()
             return
         if self._aspect_ratio_preset != preset:
             self._aspect_ratio_preset = preset
@@ -794,6 +814,7 @@ class AppViewModel(QObject):
         if self._lock_crop_aspect_ratio != flag:
             self._lock_crop_aspect_ratio = flag
             self.cropSettingsChanged.emit()
+            self._persist_config()
 
     @Property(int, notify=cropBoxesChanged)
     def selectedCropSensitivity(self) -> int:
@@ -817,6 +838,10 @@ class AppViewModel(QObject):
                     else self._aspect_ratio_preset
                 )
                 self._redetect_single_crop_at(self._selected_crop_index, clamped, ratio)
+            if self._detection_sensitivity != clamped:
+                self._detection_sensitivity = clamped
+                self.cropSettingsChanged.emit()
+                self._persist_config()
             return
         self.detectionSensitivity = clamped
 
@@ -1517,7 +1542,9 @@ class AppViewModel(QObject):
         new_resolutions = list(source_caps.resolutions) if source_caps.resolutions else [150, 300, 600]
         prev_dpi = self._selected_resolution
         self._resolutions = new_resolutions
-        if prev_dpi in new_resolutions:
+        if self._preferred_resolution_dpi in new_resolutions:
+            self._selected_resolution = self._preferred_resolution_dpi
+        elif prev_dpi in new_resolutions:
             self._selected_resolution = prev_dpi
         elif 300 in new_resolutions:
             self._selected_resolution = 300
@@ -1527,7 +1554,7 @@ class AppViewModel(QObject):
         preview_choices = [d for d in new_resolutions if 50 <= d <= 600] or list(new_resolutions)
         self._preview_dpi_choices = preview_choices
         self._selected_preview_dpi = select_preview_dpi(
-            preview_choices, preferred_dpi=self._selected_preview_dpi
+            preview_choices, preferred_dpi=self._preferred_preview_dpi
         )
         self.resolutionChanged.emit()
         self.previewChanged.emit()
@@ -1538,8 +1565,11 @@ class AppViewModel(QObject):
         defaults = (
             self._config_store.reset() if self._config_store is not None else UserConfig.defaults()
         )
+        self._preferred_scanner_url = defaults.last_scanner_url
         self._preferred_input_source = defaults.input_source
         self._preferred_paper_size_code = defaults.paper_size_code
+        self._preferred_resolution_dpi = defaults.resolution_dpi
+        self._preferred_preview_dpi = defaults.preview_dpi
         self._selected_preview_dpi = defaults.preview_dpi
 
         self._selected_save_format = normalize_save_format(defaults.save_format)
@@ -1554,6 +1584,7 @@ class AppViewModel(QObject):
         self._detection_preset = normalize_detection_preset(defaults.detection_preset)
         self._detection_sensitivity = defaults.detection_sensitivity
         self._aspect_ratio_preset = normalize_aspect_ratio_preset(defaults.aspect_ratio_preset)
+        self._lock_crop_aspect_ratio = defaults.lock_crop_aspect_ratio
         self._crop_margin_mm = defaults.crop_margin_mm
 
         self._bleed_through_enabled = defaults.bleed_through_enabled
@@ -1591,6 +1622,7 @@ class AppViewModel(QObject):
             return
         try:
             caps = self._capabilities_fetcher(scanner.capabilities_url)
+            self._preferred_scanner_url = scanner.base_url
             self._apply_capabilities(caps)
             model_title = caps.make_and_model or scanner.name
             max_mm = f"{caps.primary_source.max_width_mm:.0f}×{caps.primary_source.max_height_mm:.0f}mm"
@@ -1612,6 +1644,9 @@ class AppViewModel(QObject):
             return
 
         if not found:
+            if self._preferred_scanner_url:
+                self.addManualScanner(self._preferred_scanner_url)
+                return
             self.set_status_message(
                 "ネットワーク上に eSCL スキャナが見つかりませんでした（電源・同一Wi-Fi接続をご確認いただくか、IPアドレスを直接指定してください）"
             )
@@ -1619,7 +1654,15 @@ class AppViewModel(QObject):
 
         self._discovered_by_label = {scanner.display_label: scanner for scanner in found}
         self._scanners = list(self._discovered_by_label.keys())
-        self._selected_scanner = self._scanners[0]
+        preferred_label = next(
+            (
+                scanner.display_label
+                for scanner in found
+                if scanner.base_url == self._preferred_scanner_url
+            ),
+            None,
+        )
+        self._selected_scanner = preferred_label or self._scanners[0]
         self.scannerChanged.emit()
         self._load_capabilities_for_selected_scanner()
 
@@ -1648,6 +1691,7 @@ class AppViewModel(QObject):
             if label not in self._scanners or "未検出" in self._scanners[0]:
                 self._scanners = list(self._discovered_by_label.keys())
             self._selected_scanner = label
+            self._preferred_scanner_url = scanner.base_url
             self.scannerChanged.emit()
             self._apply_capabilities(caps)
             max_mm = f"{caps.primary_source.max_width_mm:.0f}×{caps.primary_source.max_height_mm:.0f}mm"

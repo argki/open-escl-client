@@ -83,6 +83,7 @@ Item {
             id: boxDelegate
             objectName: "cropBoxDelegate_" + index
             anchors.fill: parent
+            z: isSelected ? 10 : 0
 
             readonly property int boxListIndex: index
             readonly property var boxData: (overlayRoot.cropBoxes && index < overlayRoot.cropBoxes.length)
@@ -95,22 +96,34 @@ Item {
             readonly property int effRot: boxData ? (boxData.effectiveRotationDeg || 0) : 0
             readonly property bool hasManualRot: boxData ? (boxData.manualRotationDeg !== undefined && boxData.manualRotationDeg >= 0) : false
 
-            // 中心付近の移動ドラッグ領域
-            Rectangle {
+            // 枠の内側全体（回転角を維持した矩形領域）をドラッグして平行移動できる領域
+            Item {
                 id: moveAnchor
-                width: Math.max(28, Math.min(72, (boxData ? boxData.widthNorm : 0.1) * overlayRoot.width * 0.45))
-                height: Math.max(28, Math.min(72, (boxData ? boxData.heightNorm : 0.1) * overlayRoot.height * 0.45))
+                objectName: "cropMoveArea_" + boxDelegate.boxDisplayIndex
+                width: Math.max(24, (boxData ? boxData.widthNorm : 0.1) * overlayRoot.width)
+                height: Math.max(24, (boxData ? boxData.heightNorm : 0.1) * overlayRoot.height)
                 x: (boxData ? boxData.centerXNorm : 0.5) * overlayRoot.width - width / 2
                 y: (boxData ? boxData.centerYNorm : 0.5) * overlayRoot.height - height / 2
-                radius: 6
-                color: isSelected ? "#222563EB" : "transparent"
-                border.color: isSelected ? "#662563EB" : "transparent"
-                border.width: 1
+                rotation: boxData ? (boxData.effectiveAngleDeg || 0) : 0
+                transformOrigin: Item.Center
+
+                // 中心付近の控えめな移動視覚マーカー
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: Math.max(24, Math.min(48, parent.width * 0.3))
+                    height: Math.max(24, Math.min(48, parent.height * 0.3))
+                    radius: 6
+                    color: isSelected ? "#222563EB" : "transparent"
+                    border.color: isSelected ? "#662563EB" : "transparent"
+                    border.width: 1
+                }
 
                 MouseArea {
+                    id: moveDragMouseArea
+                    objectName: "cropMoveMouseArea_" + boxDelegate.boxDisplayIndex
                     anchors.fill: parent
                     preventStealing: true
-                    cursorShape: Qt.OpenHandCursor
+                    cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
                     property real lastX: 0
                     property real lastY: 0
 
@@ -198,6 +211,7 @@ Item {
                     id: cornerHandle
                     objectName: "cropCornerHandle_" + boxDelegate.boxDisplayIndex + "_" + index
                     visible: boxDelegate.isSelected && boxDelegate.boxData !== null
+                    z: 2
                     readonly property int cornerIdx: index
                     width: 14
                     height: 14

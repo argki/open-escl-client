@@ -1363,6 +1363,116 @@ def test_sidebar_panels_fit_within_groupbox_and_zoom_centers_on_pointer() -> Non
     engine.deleteLater()
 
 
+def test_crop_interior_move_area_and_full_restart_persistence(tmp_path: Path) -> None:
+    """Crop box interior drag area matches full box bounds and all sidebar settings persist."""
+    import numpy as np
+    import pytest
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:550] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    cfg_path = tmp_path / "restart_config.json"
+    store1 = UserConfigStore(cfg_path)
+    vm1 = AppViewModel(
+        config_store=store1,
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm1.addManualScanner("192.168.1.50")
+    vm1.requestPreview()
+    assert vm1.cropCount == 1
+
+    # Verify QML cropMoveArea covers full box interior rather than only a small center square
+    engine, _ = create_qml_engine(vm1)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+    crop_overlay = root.findChild(QObject, "cropOverlay")
+    assert crop_overlay is not None
+
+    def _find_visual_item(item: QObject, target_name: str) -> QObject | None:
+        if item.objectName() == target_name:
+            return item
+        child_items = getattr(item, "childItems", None)
+        if callable(child_items):
+            for ch in child_items():
+                found = _find_visual_item(ch, target_name)
+                if found is not None:
+                    return found
+        return None
+
+    move_area = _find_visual_item(crop_overlay, "cropMoveArea_1")
+    assert move_area is not None
+    ov_w = float(crop_overlay.property("width"))
+    ov_h = float(crop_overlay.property("height"))
+    box0 = vm1.cropOverlayBoxes[0]
+    assert float(move_area.property("width")) == pytest.approx(
+        float(box0["widthNorm"]) * ov_w, abs=1.0
+    )
+    assert float(move_area.property("height")) == pytest.approx(
+        float(box0["heightNorm"]) * ov_h, abs=1.0
+    )
+    assert float(move_area.property("rotation")) == pytest.approx(
+        float(box0["effectiveAngleDeg"]), abs=1e-4
+    )
+
+    # Change settings INCLUDING scanner-specific 1200 DPI, lockCropAspectRatio,
+    # and sensitivity/aspect ratio while a crop box is selected.
+    vm1.selectedResolution = 1200
+    vm1.selectedPreviewDpi = 200
+    vm1.lockCropAspectRatio = True
+    vm1.selectedCropSensitivity = 2
+    iso_label = next(lbl for lbl in vm1.aspectRatioPresets if "A判" in lbl)
+    vm1.selectedCropAspectRatioPreset = iso_label
+    vm1.bleedThroughEnabled = False
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+    # Restart simulation: empty mDNS list should fall back to last_scanner_url,
+    # preserving 1200 DPI and all sidebar settings.
+    mock_discovery_empty = MagicMock()
+    mock_discovery_empty.discover.return_value = []
+    store2 = UserConfigStore(cfg_path)
+    vm2 = AppViewModel(
+        config_store=store2,
+        discovery_service=mock_discovery_empty,
+        capabilities_fetcher=mock_fetcher,
+    )
+    assert vm2.lockCropAspectRatio is True
+    assert vm2.detectionSensitivity == 2
+    assert vm2.selectedCropAspectRatioPreset == iso_label
+    assert vm2.bleedThroughEnabled is False
+
+    # Even if another setting changes before scanner discovery completes, 1200 DPI & URL survive
+    vm2.bleedThroughEnabled = True
+    vm2.refreshScanners()
+    assert "192.168.1.50" in vm2.selectedScanner
+    assert vm2.selectedResolution == 1200
+    assert vm2.selectedPreviewDpi == 200
+    assert vm2.lockCropAspectRatio is True
+    assert vm2.detectionSensitivity == 2
+    assert vm2.selectedCropAspectRatioPreset == iso_label
+    assert vm2.bleedThroughEnabled is True
+
+
+
 
 
 

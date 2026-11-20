@@ -57,6 +57,11 @@ GroupBox {
                 Layout.minimumWidth: 0
                 text: viewModel ? viewModel.saveDirectory : ""
                 placeholderText: "~/Pictures/Scans"
+                onTextEdited: {
+                    if (viewModel && text.trim().length > 0) {
+                        viewModel.saveDirectory = text
+                    }
+                }
                 onEditingFinished: {
                     if (viewModel) {
                         viewModel.saveDirectory = text
