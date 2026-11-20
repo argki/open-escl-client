@@ -1,6 +1,6 @@
 # REQ-009: プレビューキャンバスの操作性向上・切り出し拡大表示と検出枠ドラッグ修正
 
-- **ステータス**: `未着手`
+- **ステータス**: `完了`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-003`](./REQ-003-fast-preview-scan.md), [`REQ-005`](./REQ-005-multi-crop-and-rotation-correction.md)
@@ -49,7 +49,7 @@ feature/preview-canvas-and-crop-ux
 
 ### タスク 1: プレビュー領域の右はみ出し修正とマウスホイール拡大縮小・スクロールバー実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/qml/PreviewArea.qml` のヘッダー `RowLayout` と下部サムネイルヘッダーにおいて、`Label` に `Layout.fillWidth: true` / `Layout.minimumWidth: 0` / `elide: Text.ElideRight` を設定し、右側のズームコントロールや文言がウィンドウ外へ押し出されないよう修正する（必要に応じて `Main.qml` の初期サイズ・レイアウトも確認）
   - `PreviewArea.qml` の `previewFlickable` に `ScrollBar.vertical` / `ScrollBar.horizontal` を追加し、`WheelHandler`（または `MouseArea.onWheel`）でマウスホイール上下に応じた `zoomInPreview()` / `zoomOutPreview()`（および連続ズームステップ）を実装する
@@ -75,7 +75,7 @@ fix(ui): プレビュー領域の右側見切れ修正とマウスホイール�
 
 ### タスク 2: 切り出し結果の上部拡大プレビュー切り替えと「全体像」戻りサムネイルの実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/viewmodel.py` に上部キャンバスの表示モード（全体プレビュー `"full"` vs 指定切り出しカードの拡大表示 `"crop"`）および `activePreviewMode` / `showFullPreview()` / `inspectCropPreview(index)` を追加する
   - 切り出しプレビュー時は該当枠の切り出し・傾き補正・回転・裏写り除去適用済み画像をメインキャンバス用画像として供給し、下部ストリップの左端に「全体像」サムネイル（`fullPreviewThumbnailUrl`）を配置する
@@ -102,7 +102,7 @@ feat(ui): 切り出しカードのメインキャンバス拡大表示と「全�
 
 ### タスク 3: 検出枠ドラッグ調整（移動・リサイズ）の途切れ根本修正と比率維持リサイズ対応
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - **途切れ原因の修正**: `src/open_escl_client/ui/qml/CropOverlay.qml` において、`Repeater` への全配列再代入による delegate 破棄で `MouseArea` ドラッグが中断する構造を見直し、ドラッグ中は QML ローカル状態（またはインデックス維持＋個別データバインディング更新／Canvas 再描画のみ）で滑らかに枠を動かし、ドラッグ中毎フレームの重いサムネイル再生成は行わずリリース時（`onReleased`）に確定反映・サムネイル更新する方式へ改善する
   - **比率維持リサイズ対応**: `src/open_escl_client/imaging/multi_crop.py`（`drag_corner_to` / 新パラメータ `lock_aspect_ratio: bool`）および `AppViewModel.dragCropCornerToNorm` に、選択中の規格比率（`selectedCropAspectRatioPreset` が `auto`/`free` 以外で比率が定まっている場合、または「比率を維持して枠調整」トグル／Shift キー押下時）を維持したまま対角頂点固定で四隅を拡大縮小できるロジックを追加する

@@ -15,6 +15,58 @@ Rectangle {
     objectName: "previewArea"
     color: "#E5E7EB"
 
+    function zoomAroundViewportPoint(zoomIn, vx, vy) {
+        if (!viewModel || !viewModel.hasPreview) {
+            return
+        }
+        var vw = previewFlickable.width
+        var vh = previewFlickable.height
+        if (vw <= 0 || vh <= 0) {
+            if (zoomIn) {
+                viewModel.zoomInPreview()
+            } else {
+                viewModel.zoomOutPreview()
+            }
+            return
+        }
+
+        var oldZoom = viewModel.previewZoom
+        var oldImgW = vw * oldZoom
+        var oldImgH = vh * oldZoom
+        var oldContentW = Math.max(vw, oldImgW)
+        var oldContentH = Math.max(vh, oldImgH)
+        var oldImgX = Math.max(0, (oldContentW - oldImgW) * 0.5)
+        var oldImgY = Math.max(0, (oldContentH - oldImgH) * 0.5)
+
+        var relX = (previewFlickable.contentX + vx - oldImgX) / Math.max(1.0, oldImgW)
+        var relY = (previewFlickable.contentY + vy - oldImgY) / Math.max(1.0, oldImgH)
+
+        if (zoomIn) {
+            viewModel.zoomInPreview()
+        } else {
+            viewModel.zoomOutPreview()
+        }
+
+        var newZoom = viewModel.previewZoom
+        if (Math.abs(newZoom - oldZoom) < 1e-6) {
+            return
+        }
+        var newImgW = vw * newZoom
+        var newImgH = vh * newZoom
+        var newContentW = Math.max(vw, newImgW)
+        var newContentH = Math.max(vh, newImgH)
+        var newImgX = Math.max(0, (newContentW - newImgW) * 0.5)
+        var newImgY = Math.max(0, (newContentH - newImgH) * 0.5)
+
+        var maxContentX = Math.max(0, newContentW - vw)
+        var maxContentY = Math.max(0, newContentH - vh)
+        var targetX = Math.max(0, Math.min(maxContentX, newImgX + relX * newImgW - vx))
+        var targetY = Math.max(0, Math.min(maxContentY, newImgY + relY * newImgH - vy))
+
+        previewFlickable.contentX = targetX
+        previewFlickable.contentY = targetY
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 20
@@ -24,20 +76,31 @@ Rectangle {
         // 1. プレビューヘッダー（設定サマリー・プレビューDPI・ズーム操作ボタン）
         // --------------------------------------------------------------------
         RowLayout {
+            id: previewHeaderRow
             Layout.fillWidth: true
-            spacing: 10
+            spacing: 8
 
             Label {
-                text: "プレビューキャンバス（色合い・自動トリミング確認）"
-                font.pixelSize: 15
+                id: previewTitleLabel
+                objectName: "previewTitleLabel"
+                text: (viewModel && viewModel.isInspectingCrop)
+                    ? ("切り出し結果 #" + (viewModel.selectedCropIndex + 1) + " プレビュー")
+                    : "プレビューキャンバス（色合い・自動トリミング確認）"
+                font.pixelSize: 14
                 font.bold: true
                 color: "#1F2937"
+                Layout.minimumWidth: 100
+                Layout.maximumWidth: implicitWidth
+                elide: Text.ElideRight
             }
 
-            Item { Layout.fillWidth: true }
-
             Label {
+                id: previewSummaryLabel
                 objectName: "previewSummaryLabel"
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                horizontalAlignment: Text.AlignRight
+                elide: Text.ElideRight
                 text: viewModel
                       ? (viewModel.selectedPaperSize
                          + " / プレビュー: " + viewModel.previewDpi + " dpi"
@@ -50,6 +113,9 @@ Rectangle {
 
             // ズーム操作コントロール
             RowLayout {
+                id: zoomControlsRow
+                objectName: "zoomControlsRow"
+                Layout.fillWidth: false
                 spacing: 4
                 visible: viewModel ? viewModel.hasPreview : false
 
@@ -58,7 +124,7 @@ Rectangle {
                     text: "－"
                     implicitWidth: 32
                     implicitHeight: 28
-                    onClicked: if (viewModel) viewModel.zoomOutPreview()
+                    onClicked: previewRoot.zoomAroundViewportPoint(false, previewFlickable.width * 0.5, previewFlickable.height * 0.5)
                 }
 
                 Button {
@@ -66,7 +132,13 @@ Rectangle {
                     text: viewModel ? Math.round(viewModel.previewZoom * 100) + "%" : "100%"
                     implicitWidth: 58
                     implicitHeight: 28
-                    onClicked: if (viewModel) viewModel.resetPreviewZoom()
+                    onClicked: {
+                        if (viewModel) {
+                            viewModel.resetPreviewZoom()
+                            previewFlickable.contentX = 0
+                            previewFlickable.contentY = 0
+                        }
+                    }
                 }
 
                 Button {
@@ -74,7 +146,7 @@ Rectangle {
                     text: "＋"
                     implicitWidth: 32
                     implicitHeight: 28
-                    onClicked: if (viewModel) viewModel.zoomInPreview()
+                    onClicked: previewRoot.zoomAroundViewportPoint(true, previewFlickable.width * 0.5, previewFlickable.height * 0.5)
                 }
             }
         }
@@ -115,7 +187,7 @@ Rectangle {
                 }
             }
 
-            // プレビュー画像表示領域（ズーム・スクロール・トリミング枠オーバーレイ対応）
+            // プレビュー画像表示領域（ズーム・ホイール・スクロールバー・トリミング枠オーバーレイ対応）
             Flickable {
                 id: previewFlickable
                 objectName: "previewFlickable"
@@ -123,14 +195,64 @@ Rectangle {
                 anchors.margins: 12
                 clip: true
                 interactive: !cropOverlay.dragging
+                boundsBehavior: Flickable.StopAtBounds
                 visible: viewModel ? viewModel.hasPreview : false
                 contentWidth: Math.max(width, previewCanvasImage.width)
                 contentHeight: Math.max(height, previewCanvasImage.height)
 
+                ScrollBar.vertical: ScrollBar {
+                    id: previewVScrollBar
+                    objectName: "previewVerticalScrollBar"
+                    policy: previewFlickable.contentHeight > previewFlickable.height + 1
+                            ? ScrollBar.AlwaysOn
+                            : ScrollBar.AsNeeded
+                }
+
+                ScrollBar.horizontal: ScrollBar {
+                    id: previewHScrollBar
+                    objectName: "previewHorizontalScrollBar"
+                    policy: previewFlickable.contentWidth > previewFlickable.width + 1
+                            ? ScrollBar.AlwaysOn
+                            : ScrollBar.AsNeeded
+                }
+
+                WheelHandler {
+                    id: previewWheelHandler
+                    objectName: "previewWheelHandler"
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    property real wheelAccum: 0
+                    onWheel: function(event) {
+                        if (!viewModel || !viewModel.hasPreview) {
+                            return
+                        }
+                        var delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.pixelDelta.y
+                        if (delta === 0) {
+                            return
+                        }
+                        var rawX = (event && event.x !== undefined) ? event.x : point.position.x
+                        var rawY = (event && event.y !== undefined) ? event.y : point.position.y
+                        var vpPt = previewFlickable.contentItem.mapToItem(previewFlickable, rawX, rawY)
+                        if (wheelAccum * delta < 0) {
+                            wheelAccum = 0
+                        }
+                        wheelAccum += delta
+                        if (wheelAccum >= 60) {
+                            previewRoot.zoomAroundViewportPoint(true, vpPt.x, vpPt.y)
+                            wheelAccum = 0
+                        } else if (wheelAccum <= -60) {
+                            previewRoot.zoomAroundViewportPoint(false, vpPt.x, vpPt.y)
+                            wheelAccum = 0
+                        }
+                        event.accepted = true
+                    }
+                }
+
                 Image {
                     id: previewCanvasImage
                     objectName: "previewCanvasImage"
-                    anchors.centerIn: parent
+                    x: Math.max(0, (previewFlickable.contentWidth - width) * 0.5)
+                    y: Math.max(0, (previewFlickable.contentHeight - height) * 0.5)
                     width: previewFlickable.width * (viewModel ? viewModel.previewZoom : 1.0)
                     height: previewFlickable.height * (viewModel ? viewModel.previewZoom : 1.0)
                     fillMode: Image.PreserveAspectFit
@@ -200,48 +322,51 @@ Rectangle {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: 8
 
                     Label {
                         text: "切り出し・角度補正・自動回転プレビュー (" + (viewModel ? viewModel.cropCount : 0) + "件)"
                         font.pixelSize: 12
                         font.bold: true
                         color: "#374151"
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                     }
 
-                    Item { Layout.fillWidth: true }
-
                     Label {
-                        text: "各カードをクリックして選択・90°回転や余白を微調整できます"
+                        id: cropStripHintLabel
+                        objectName: "cropStripHintLabel"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        horizontalAlignment: Text.AlignRight
+                        elide: Text.ElideRight
+                        text: "全体像またはカードをクリックして上部キャンバスで拡大確認できます"
                         font.pixelSize: 11
                         color: "#6B7280"
                     }
                 }
 
-                ListView {
-                    id: cropThumbnailList
-                    objectName: "cropThumbnailList"
+                RowLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    orientation: ListView.Horizontal
                     spacing: 10
-                    clip: true
-                    model: viewModel ? viewModel.cropBoxes : []
 
-                    delegate: Rectangle {
-                        id: thumbCard
-                        width: 128
-                        height: cropThumbnailList.height
+                    Rectangle {
+                        id: fullOverviewCard
+                        objectName: "fullOverviewCard"
+                        Layout.preferredWidth: 112
+                        Layout.fillHeight: true
                         radius: 5
-                        color: modelData.selected ? "#EFF6FF" : "#FFFFFF"
-                        border.color: modelData.selected ? "#2563EB" : "#D1D5DB"
-                        border.width: modelData.selected ? 2 : 1
+                        color: !(viewModel && viewModel.isInspectingCrop) ? "#EFF6FF" : "#FFFFFF"
+                        border.color: !(viewModel && viewModel.isInspectingCrop) ? "#2563EB" : "#D1D5DB"
+                        border.width: !(viewModel && viewModel.isInspectingCrop) ? 2 : 1
 
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 if (viewModel) {
-                                    viewModel.selectCropBox(modelData.listIndex)
+                                    viewModel.showFullPreview()
                                 }
                             }
                         }
@@ -256,21 +381,109 @@ Rectangle {
                                 spacing: 4
 
                                 Label {
-                                    text: "#" + modelData.index
+                                    text: "全体像"
                                     font.pixelSize: 11
                                     font.bold: true
-                                    color: modelData.selected ? "#1D4ED8" : "#059669"
+                                    color: !(viewModel && viewModel.isInspectingCrop) ? "#1D4ED8" : "#374151"
                                 }
 
                                 Item { Layout.fillWidth: true }
 
                                 Label {
-                                    text: modelData.effectiveRotationDeg + "°"
-                                    font.pixelSize: 10
+                                    visible: !(viewModel && viewModel.isInspectingCrop)
+                                    text: "表示中"
+                                    font.pixelSize: 9
                                     font.bold: true
-                                    color: "#4B5563"
+                                    color: "#2563EB"
                                 }
                             }
+
+                            Image {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                fillMode: Image.PreserveAspectFit
+                                smooth: true
+                                mipmap: true
+                                cache: false
+                                asynchronous: false
+                                source: viewModel ? viewModel.fullPreviewThumbnailUrl : ""
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "原稿台・枠編集"
+                                font.pixelSize: 10
+                                color: "#6B7280"
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+
+                    ListView {
+                        id: cropThumbnailList
+                        objectName: "cropThumbnailList"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        orientation: ListView.Horizontal
+                        spacing: 10
+                        clip: true
+                        model: viewModel ? viewModel.cropBoxes : []
+
+                        delegate: Rectangle {
+                            id: thumbCard
+                            width: 128
+                            height: cropThumbnailList.height
+                            radius: 5
+                            color: modelData.selected ? "#EFF6FF" : "#FFFFFF"
+                            border.color: (modelData.selected && viewModel && viewModel.isInspectingCrop)
+                                ? "#2563EB"
+                                : (modelData.selected ? "#10B981" : "#D1D5DB")
+                            border.width: modelData.selected ? 2 : 1
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (viewModel) {
+                                        viewModel.inspectCropPreview(modelData.listIndex)
+                                    }
+                                }
+                            }
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 5
+                                spacing: 3
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+
+                                    Label {
+                                        text: "#" + modelData.index
+                                        font.pixelSize: 11
+                                        font.bold: true
+                                        color: modelData.selected ? "#1D4ED8" : "#059669"
+                                    }
+
+                                    Label {
+                                        visible: modelData.selected && viewModel && viewModel.isInspectingCrop
+                                        text: "拡大中"
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        color: "#2563EB"
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    Label {
+                                        text: modelData.effectiveRotationDeg + "°"
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                        color: "#4B5563"
+                                    }
+                                }
 
                             Image {
                                 Layout.fillWidth: true
@@ -317,6 +530,7 @@ Rectangle {
                                             viewModel.rotateCropBox(modelData.listIndex, 90)
                                         }
                                     }
+                                }
                                 }
                             }
                         }

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 import threading
+from typing import Literal
 from urllib.parse import urlparse
 
 import cv2
@@ -55,6 +56,7 @@ from open_escl_client.imaging.multi_crop import (
     encode_image_bytes,
     normalize_aspect_ratio_preset,
     normalize_detection_preset,
+    oriented_aspect_ratio_for_preset,
 )
 from open_escl_client.imaging.orientation import (
     AutoOrientationCorrector,
@@ -163,6 +165,7 @@ class AppViewModel(QObject):
     previewZoomChanged = Signal()
     cropSettingsChanged = Signal()
     cropBoxesChanged = Signal()
+    cropOverlayChanged = Signal()
 
     # Internal thread-safe completion signals for background scan tasks
     _previewFinishedInternal = Signal(object)
@@ -206,6 +209,7 @@ class AppViewModel(QObject):
         self._previewFailedInternal.connect(self._on_preview_failed)
         self._scanSaveFinishedInternal.connect(self._on_scan_save_finished)
         self._scanSaveFailedInternal.connect(self._on_scan_save_failed)
+        self.cropBoxesChanged.connect(self.cropOverlayChanged)
 
         loaded_cfg = self._config_store.load() if self._config_store is not None else UserConfig()
 
@@ -218,8 +222,11 @@ class AppViewModel(QObject):
         self._scanners: list[str] = ["スキャナ未検出（「スキャナを再検索」またはIP指定）"]
         self._selected_scanner: str = self._scanners[0]
 
+        self._preferred_scanner_url: str = loaded_cfg.last_scanner_url
         self._preferred_input_source: str = loaded_cfg.input_source
         self._preferred_paper_size_code: str = loaded_cfg.paper_size_code
+        self._preferred_resolution_dpi: int = loaded_cfg.resolution_dpi
+        self._preferred_preview_dpi: int = loaded_cfg.preview_dpi
 
         self._input_sources: list[str] = [INPUT_SOURCE_LABELS[InputSourceKind.PLATEN]]
         self._selected_input_source: str = (
@@ -274,6 +281,9 @@ class AppViewModel(QObject):
         self._preview_session: PreviewSession | None = None
         self._preview_bgr: np.ndarray | None = None
         self._preview_image_url: str = ""
+        self._full_preview_thumbnail_url: str = ""
+        self._inspect_preview_url: str = ""
+        self._active_preview_mode: Literal["full", "crop"] = "full"
         self._preview_zoom: float = 1.0
 
         self._auto_crop_enabled: bool = loaded_cfg.auto_crop_enabled
@@ -293,6 +303,9 @@ class AppViewModel(QObject):
         self._crop_aspect_ratios: list[AspectRatioPreset] = []
         self._crop_thumbnail_urls: dict[int, str] = {}
         self._selected_crop_index: int = -1
+        self._lock_crop_aspect_ratio: bool = loaded_cfg.lock_crop_aspect_ratio
+        self._dragging_crop_index: int = -1
+        self._drag_locked_aspect_ratio: float | None = None
         self._preview_boxes_ready_for_save: bool = False
         self._last_scan_pipeline: MultiCropScanPipeline | None = None
 
@@ -324,15 +337,25 @@ class AppViewModel(QObject):
         scanner = self._discovered_by_label.get(self._selected_scanner)
         paper_opt = self.current_paper_size_option
         paper_code = paper_opt.code if paper_opt is not None else self._preferred_paper_size_code
+        res_dpi = (
+            self._selected_resolution
+            if self._current_capabilities is not None
+            else self._preferred_resolution_dpi
+        )
+        prev_dpi = (
+            self._selected_preview_dpi
+            if self._current_capabilities is not None
+            else self._preferred_preview_dpi
+        )
         cfg = UserConfig(
             save_directory=self._save_directory,
             naming_rule=self._naming_rule,
             save_format=self._selected_save_format,
-            resolution_dpi=self._selected_resolution,
-            preview_dpi=self._selected_preview_dpi,
+            resolution_dpi=res_dpi,
+            preview_dpi=prev_dpi,
             jpeg_quality=self._jpeg_quality,
             multipage_pdf=self._multipage_pdf,
-            last_scanner_url=scanner.base_url if scanner is not None else "",
+            last_scanner_url=scanner.base_url if scanner is not None else self._preferred_scanner_url,
             input_source=self._preferred_input_source or self._selected_input_source,
             paper_size_code=paper_code,
             auto_crop_enabled=self._auto_crop_enabled,
@@ -341,6 +364,7 @@ class AppViewModel(QObject):
             detection_preset=self._detection_preset,
             detection_sensitivity=self._detection_sensitivity,
             aspect_ratio_preset=self._aspect_ratio_preset,
+            lock_crop_aspect_ratio=self._lock_crop_aspect_ratio,
             crop_margin_mm=self._crop_margin_mm,
             bleed_through_enabled=self._bleed_through_enabled,
             bleed_through_strength=self._bleed_through_strength,
@@ -447,8 +471,9 @@ class AppViewModel(QObject):
     @selectedResolution.setter
     def selectedResolution(self, value: int) -> None:
         int_val = int(value)
-        if self._selected_resolution != int_val:
+        if self._selected_resolution != int_val or self._preferred_resolution_dpi != int_val:
             self._selected_resolution = int_val
+            self._preferred_resolution_dpi = int_val
             self.resolutionChanged.emit()
             self._persist_config()
 
@@ -564,8 +589,27 @@ class AppViewModel(QObject):
     def hasPreview(self) -> bool:
         return self._preview_session is not None and bool(self._preview_image_url)
 
+    @Property(bool, notify=previewChanged)
+    def isInspectingCrop(self) -> bool:
+        return (
+            self._active_preview_mode == "crop"
+            and self._preview_session is not None
+            and bool(self._inspect_preview_url)
+            and 0 <= self._selected_crop_index < len(self._crop_boxes)
+        )
+
+    @Property(str, notify=previewChanged)
+    def activePreviewMode(self) -> str:
+        return "crop" if self.isInspectingCrop else "full"
+
+    @Property(str, notify=previewChanged)
+    def fullPreviewThumbnailUrl(self) -> str:
+        return self._full_preview_thumbnail_url
+
     @Property(str, notify=previewChanged)
     def previewImageUrl(self) -> str:
+        if self.isInspectingCrop:
+            return self._inspect_preview_url
         return self._preview_image_url
 
     @Property(int, notify=previewChanged)
@@ -588,8 +632,9 @@ class AppViewModel(QObject):
     @selectedPreviewDpi.setter
     def selectedPreviewDpi(self, value: int) -> None:
         clamped = max(50, min(600, int(value)))
-        if self._selected_preview_dpi != clamped:
+        if self._selected_preview_dpi != clamped or self._preferred_preview_dpi != clamped:
             self._selected_preview_dpi = clamped
+            self._preferred_preview_dpi = clamped
             self.previewChanged.emit()
             self._persist_config()
 
@@ -599,12 +644,16 @@ class AppViewModel(QObject):
 
     @Property(int, notify=previewChanged)
     def previewImageWidth(self) -> int:
+        if self.isInspectingCrop:
+            return int(self._image_provider.inspect_image.width())
         if self._preview_session is not None:
             return int(self._preview_session.image_width_px)
         return 0
 
     @Property(int, notify=previewChanged)
     def previewImageHeight(self) -> int:
+        if self.isInspectingCrop:
+            return int(self._image_provider.inspect_image.height())
         if self._preview_session is not None:
             return int(self._preview_session.image_height_px)
         return 0
@@ -743,6 +792,10 @@ class AppViewModel(QObject):
                     else self._detection_sensitivity
                 )
                 self._redetect_single_crop_at(self._selected_crop_index, sens, preset)
+            if self._aspect_ratio_preset != preset:
+                self._aspect_ratio_preset = preset
+                self.cropSettingsChanged.emit()
+                self._persist_config()
             return
         if self._aspect_ratio_preset != preset:
             self._aspect_ratio_preset = preset
@@ -750,6 +803,18 @@ class AppViewModel(QObject):
             self._persist_config()
             if self._auto_crop_enabled and self._preview_bgr is not None:
                 self._analyze_preview_crops()
+
+    @Property(bool, notify=cropSettingsChanged)
+    def lockCropAspectRatio(self) -> bool:
+        return self._lock_crop_aspect_ratio
+
+    @lockCropAspectRatio.setter
+    def lockCropAspectRatio(self, value: bool) -> None:
+        flag = bool(value)
+        if self._lock_crop_aspect_ratio != flag:
+            self._lock_crop_aspect_ratio = flag
+            self.cropSettingsChanged.emit()
+            self._persist_config()
 
     @Property(int, notify=cropBoxesChanged)
     def selectedCropSensitivity(self) -> int:
@@ -773,6 +838,10 @@ class AppViewModel(QObject):
                     else self._aspect_ratio_preset
                 )
                 self._redetect_single_crop_at(self._selected_crop_index, clamped, ratio)
+            if self._detection_sensitivity != clamped:
+                self._detection_sensitivity = clamped
+                self.cropSettingsChanged.emit()
+                self._persist_config()
             return
         self.detectionSensitivity = clamped
 
@@ -856,8 +925,7 @@ class AppViewModel(QObject):
             return int(self._crop_boxes[self._selected_crop_index].effective_rotation_cw_deg)
         return 0
 
-    @Property("QVariantList", notify=cropBoxesChanged)
-    def cropBoxes(self) -> list[dict[str, object]]:
+    def _serialize_crop_boxes(self) -> list[dict[str, object]]:
         """Serialize detected/adjusted crop boxes into normalized coordinates for QML."""
         if not self._crop_boxes or self._preview_session is None:
             return []
@@ -904,18 +972,35 @@ class AppViewModel(QObject):
             )
         return result
 
+    @Property("QVariantList", notify=cropBoxesChanged)
+    def cropBoxes(self) -> list[dict[str, object]]:
+        """Serialize detected/adjusted crop boxes into normalized coordinates for QML."""
+        return self._serialize_crop_boxes()
+
+    @Property("QVariantList", notify=cropOverlayChanged)
+    def cropOverlayBoxes(self) -> list[dict[str, object]]:
+        """Lightweight geometry list updated live during canvas dragging."""
+        return self._serialize_crop_boxes()
+
     @property
     def detected_crop_boxes(self) -> list[RotatedCropBox]:
         """Return the current list of preview-space `RotatedCropBox` instances."""
         return list(self._crop_boxes)
 
     def _clear_crop_boxes(self) -> None:
+        was_inspecting = self._active_preview_mode == "crop"
         self._crop_boxes = []
         self._crop_sensitivities = []
         self._crop_aspect_ratios = []
         self._crop_thumbnail_urls = {}
         self._selected_crop_index = -1
+        self._dragging_crop_index = -1
+        self._drag_locked_aspect_ratio = None
+        self._active_preview_mode = "full"
+        self._inspect_preview_url = ""
         self._image_provider.clear_crop_thumbnails()
+        if was_inspecting:
+            self.previewChanged.emit()
         self.cropBoxesChanged.emit()
 
     def _current_bleed_through_config(self) -> BleedThroughConfig:
@@ -938,13 +1023,18 @@ class AppViewModel(QObject):
         if self._bleed_through_enabled:
             filtered = self._maybe_apply_bleed_through(self._preview_bgr)
             url = self._image_provider.update_image_bgr(filtered)
+            full_thumb_bytes = self._render_thumbnail_bytes(filtered)
         else:
             url = self._image_provider.update_image_bytes(self._preview_session.image_bytes)
+            full_thumb_bytes = self._render_thumbnail_bytes(self._preview_bgr)
         self._preview_image_url = url
-        self.previewChanged.emit()
+        self._full_preview_thumbnail_url = self._image_provider.set_full_thumbnail_bytes(
+            full_thumb_bytes
+        )
         if self._crop_boxes:
             self._rebuild_all_crop_thumbnails()
             self.cropBoxesChanged.emit()
+        self.previewChanged.emit()
 
     def _render_thumbnail_bytes(self, bgr: np.ndarray, max_side: int = 320) -> bytes:
         h, w = bgr.shape[:2]
@@ -960,11 +1050,11 @@ class AppViewModel(QObject):
             thumb = bgr
         return encode_image_bytes(thumb, fmt="JPEG", quality=85)
 
-    def _rebuild_crop_thumbnail(self, list_index: int) -> None:
+    def _render_crop_bgr(self, list_index: int) -> np.ndarray | None:
         if self._preview_bgr is None or self._preview_session is None:
-            return
+            return None
         if not (0 <= list_index < len(self._crop_boxes)):
-            return
+            return None
         box = self._crop_boxes[list_index]
         dpi = float(self._preview_session.preview_dpi)
         cropped = self._deskew_processor.crop_box(
@@ -974,9 +1064,19 @@ class AppViewModel(QObject):
             dpi=dpi,
         )
         rotated = rotate_image_cw(cropped.image, box.effective_rotation_cw_deg)
-        thumb_bytes = self._render_thumbnail_bytes(self._maybe_apply_bleed_through(rotated))
+        return self._maybe_apply_bleed_through(rotated)
+
+    def _rebuild_crop_thumbnail(self, list_index: int) -> None:
+        rendered = self._render_crop_bgr(list_index)
+        if rendered is None:
+            return
+        box = self._crop_boxes[list_index]
+        thumb_bytes = self._render_thumbnail_bytes(rendered)
         url = self._image_provider.set_crop_thumbnail(box.index, thumb_bytes)
         self._crop_thumbnail_urls[box.index] = url
+        if self._active_preview_mode == "crop" and list_index == self._selected_crop_index:
+            self._inspect_preview_url = self._image_provider.set_inspect_image_bgr(rendered)
+            self.previewChanged.emit()
 
     def _rebuild_all_crop_thumbnails(self) -> None:
         self._image_provider.clear_crop_thumbnails()
@@ -1035,11 +1135,16 @@ class AppViewModel(QObject):
             url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
             self._crop_thumbnail_urls[refined_box.index] = url
 
+        was_inspecting = self._active_preview_mode == "crop"
         self._crop_boxes = analyzed
         self._crop_sensitivities = [self._detection_sensitivity] * len(analyzed)
         self._crop_aspect_ratios = [self._aspect_ratio_preset] * len(analyzed)
         self._selected_crop_index = 0 if analyzed else -1
+        self._active_preview_mode = "full"
+        self._inspect_preview_url = ""
         self._preview_boxes_ready_for_save = bool(analyzed)
+        if was_inspecting:
+            self.previewChanged.emit()
         self.cropBoxesChanged.emit()
 
     def _redetect_single_crop_at(
@@ -1123,11 +1228,13 @@ class AppViewModel(QObject):
                 refined_box = refined_box.with_auto_rotation(0)
 
             self._crop_boxes[list_index] = refined_box
-            thumb_bytes = self._render_thumbnail_bytes(
-                self._maybe_apply_bleed_through(final_img)
-            )
+            rendered = self._maybe_apply_bleed_through(final_img)
+            thumb_bytes = self._render_thumbnail_bytes(rendered)
             url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
             self._crop_thumbnail_urls[refined_box.index] = url
+            if self._active_preview_mode == "crop" and list_index == self._selected_crop_index:
+                self._inspect_preview_url = self._image_provider.set_inspect_image_bgr(rendered)
+                self.previewChanged.emit()
 
         self._preview_boxes_ready_for_save = bool(self._crop_boxes)
         self.cropBoxesChanged.emit()
@@ -1140,6 +1247,38 @@ class AppViewModel(QObject):
                 self.cropBoxesChanged.emit()
 
     @Slot()
+    def showFullPreview(self) -> None:
+        """Switch main preview canvas back to full platen overview mode."""
+        if self._active_preview_mode == "full":
+            return
+        self._active_preview_mode = "full"
+        self._preview_zoom = 1.0
+        self.previewZoomChanged.emit()
+        self.previewChanged.emit()
+
+    @Slot(int)
+    def inspectCropPreview(self, list_index: int) -> None:
+        """Select crop box `list_index` and inspect its cropped/rotated result in main canvas."""
+        if not (0 <= list_index < len(self._crop_boxes)):
+            return
+        selection_changed = self._selected_crop_index != list_index
+        self._selected_crop_index = list_index
+        rendered = self._render_crop_bgr(list_index)
+        if rendered is None:
+            if selection_changed:
+                self.cropBoxesChanged.emit()
+            return
+        self._inspect_preview_url = self._image_provider.set_inspect_image_bgr(rendered)
+        mode_changed = self._active_preview_mode != "crop"
+        self._active_preview_mode = "crop"
+        if mode_changed or selection_changed:
+            self._preview_zoom = 1.0
+            self.previewZoomChanged.emit()
+        self.previewChanged.emit()
+        if selection_changed:
+            self.cropBoxesChanged.emit()
+
+    @Slot()
     def redetectCropBoxes(self) -> None:
         """Re-run automatic crop detection and orientation analysis on the current preview."""
         if self._preview_bgr is None:
@@ -1149,6 +1288,75 @@ class AppViewModel(QObject):
             self.set_status_message(f"自動トリミング枠を {len(self._crop_boxes)} 件検出しました")
         else:
             self.set_status_message("自動トリミング枠は検出されませんでした")
+
+    def _resolve_corner_drag_ratio(
+        self,
+        list_index: int,
+        box: RotatedCropBox,
+        dpi: float,
+        *,
+        lock_override: bool = False,
+    ) -> tuple[bool, float | None]:
+        preset = (
+            self._crop_aspect_ratios[list_index]
+            if 0 <= list_index < len(self._crop_aspect_ratios)
+            else self._aspect_ratio_preset
+        )
+        _, _, cur_w, cur_h, _ = box.resolved_geometry(dpi=dpi)
+        preset_ratio = oriented_aspect_ratio_for_preset(preset, cur_w, cur_h)
+        if preset_ratio is not None:
+            if (
+                self._dragging_crop_index == list_index
+                and self._drag_locked_aspect_ratio is not None
+            ):
+                return True, self._drag_locked_aspect_ratio
+            return True, preset_ratio
+        should_lock = self._lock_crop_aspect_ratio or bool(lock_override)
+        if not should_lock:
+            return False, None
+        if self._dragging_crop_index == list_index and self._drag_locked_aspect_ratio is not None:
+            return True, self._drag_locked_aspect_ratio
+        current_ratio = float(cur_w) / float(cur_h) if cur_h > 0.0 else 1.0
+        return True, current_ratio
+
+    @Slot(int)
+    def beginCropDrag(self, list_index: int) -> None:
+        """Start an interactive drag session without rebuilding thumbnails every frame."""
+        if self._preview_session is None or not (0 <= list_index < len(self._crop_boxes)):
+            self._dragging_crop_index = -1
+            self._drag_locked_aspect_ratio = None
+            return
+        self._dragging_crop_index = int(list_index)
+        box = self._crop_boxes[list_index]
+        dpi = float(self._preview_session.preview_dpi)
+        _, _, cur_w, cur_h, _ = box.resolved_geometry(dpi=dpi)
+        preset = (
+            self._crop_aspect_ratios[list_index]
+            if list_index < len(self._crop_aspect_ratios)
+            else self._aspect_ratio_preset
+        )
+        preset_ratio = oriented_aspect_ratio_for_preset(preset, cur_w, cur_h)
+        if preset_ratio is not None:
+            self._drag_locked_aspect_ratio = preset_ratio
+        elif cur_h > 0.0:
+            self._drag_locked_aspect_ratio = float(cur_w) / float(cur_h)
+        else:
+            self._drag_locked_aspect_ratio = 1.0
+
+    @Slot(int)
+    def endCropDrag(self, list_index: int) -> None:
+        """Finish an interactive drag session and rebuild the crop thumbnail once."""
+        was_dragging = self._dragging_crop_index >= 0
+        target_idx = (
+            int(list_index)
+            if 0 <= list_index < len(self._crop_boxes)
+            else self._dragging_crop_index
+        )
+        self._dragging_crop_index = -1
+        self._drag_locked_aspect_ratio = None
+        if was_dragging and 0 <= target_idx < len(self._crop_boxes):
+            self._rebuild_crop_thumbnail(target_idx)
+            self.cropBoxesChanged.emit()
 
     @Slot(int, float, float)
     def moveCropBoxByNorm(self, list_index: int, dx_norm: float, dy_norm: float) -> None:
@@ -1162,16 +1370,21 @@ class AppViewModel(QObject):
         )
         self._selected_crop_index = list_index
         self._preview_boxes_ready_for_save = True
+        if self._dragging_crop_index == list_index:
+            self.cropOverlayChanged.emit()
+            return
         self._rebuild_crop_thumbnail(list_index)
         self.cropBoxesChanged.emit()
 
     @Slot(int, int, float, float)
+    @Slot(int, int, float, float, bool)
     def dragCropCornerToNorm(
         self,
         list_index: int,
         corner_index: int,
         norm_x: float,
         norm_y: float,
+        lock_aspect_ratio: bool = False,
     ) -> None:
         """Resize crop box `list_index` by moving corner `corner_index` to normalized `(x, y)`."""
         if self._preview_session is None or not (0 <= list_index < len(self._crop_boxes)):
@@ -1179,14 +1392,26 @@ class AppViewModel(QObject):
         px_x = float(np.clip(norm_x, 0.0, 1.0)) * float(self._preview_session.image_width_px)
         px_y = float(np.clip(norm_y, 0.0, 1.0)) * float(self._preview_session.image_height_px)
         dpi = float(self._preview_session.preview_dpi)
-        self._crop_boxes[list_index] = self._crop_boxes[list_index].with_corner_drag(
+        box = self._crop_boxes[list_index]
+        should_lock, target_ratio = self._resolve_corner_drag_ratio(
+            list_index,
+            box,
+            dpi,
+            lock_override=lock_aspect_ratio,
+        )
+        self._crop_boxes[list_index] = box.with_corner_drag(
             int(corner_index),
             px_x,
             px_y,
             dpi=dpi,
+            lock_aspect_ratio=should_lock,
+            target_aspect_ratio=target_ratio,
         )
         self._selected_crop_index = list_index
         self._preview_boxes_ready_for_save = True
+        if self._dragging_crop_index == list_index:
+            self.cropOverlayChanged.emit()
+            return
         self._rebuild_crop_thumbnail(list_index)
         self.cropBoxesChanged.emit()
 
@@ -1317,7 +1542,9 @@ class AppViewModel(QObject):
         new_resolutions = list(source_caps.resolutions) if source_caps.resolutions else [150, 300, 600]
         prev_dpi = self._selected_resolution
         self._resolutions = new_resolutions
-        if prev_dpi in new_resolutions:
+        if self._preferred_resolution_dpi in new_resolutions:
+            self._selected_resolution = self._preferred_resolution_dpi
+        elif prev_dpi in new_resolutions:
             self._selected_resolution = prev_dpi
         elif 300 in new_resolutions:
             self._selected_resolution = 300
@@ -1327,7 +1554,7 @@ class AppViewModel(QObject):
         preview_choices = [d for d in new_resolutions if 50 <= d <= 600] or list(new_resolutions)
         self._preview_dpi_choices = preview_choices
         self._selected_preview_dpi = select_preview_dpi(
-            preview_choices, preferred_dpi=self._selected_preview_dpi
+            preview_choices, preferred_dpi=self._preferred_preview_dpi
         )
         self.resolutionChanged.emit()
         self.previewChanged.emit()
@@ -1338,8 +1565,11 @@ class AppViewModel(QObject):
         defaults = (
             self._config_store.reset() if self._config_store is not None else UserConfig.defaults()
         )
+        self._preferred_scanner_url = defaults.last_scanner_url
         self._preferred_input_source = defaults.input_source
         self._preferred_paper_size_code = defaults.paper_size_code
+        self._preferred_resolution_dpi = defaults.resolution_dpi
+        self._preferred_preview_dpi = defaults.preview_dpi
         self._selected_preview_dpi = defaults.preview_dpi
 
         self._selected_save_format = normalize_save_format(defaults.save_format)
@@ -1354,6 +1584,7 @@ class AppViewModel(QObject):
         self._detection_preset = normalize_detection_preset(defaults.detection_preset)
         self._detection_sensitivity = defaults.detection_sensitivity
         self._aspect_ratio_preset = normalize_aspect_ratio_preset(defaults.aspect_ratio_preset)
+        self._lock_crop_aspect_ratio = defaults.lock_crop_aspect_ratio
         self._crop_margin_mm = defaults.crop_margin_mm
 
         self._bleed_through_enabled = defaults.bleed_through_enabled
@@ -1391,6 +1622,7 @@ class AppViewModel(QObject):
             return
         try:
             caps = self._capabilities_fetcher(scanner.capabilities_url)
+            self._preferred_scanner_url = scanner.base_url
             self._apply_capabilities(caps)
             model_title = caps.make_and_model or scanner.name
             max_mm = f"{caps.primary_source.max_width_mm:.0f}×{caps.primary_source.max_height_mm:.0f}mm"
@@ -1412,6 +1644,9 @@ class AppViewModel(QObject):
             return
 
         if not found:
+            if self._preferred_scanner_url:
+                self.addManualScanner(self._preferred_scanner_url)
+                return
             self.set_status_message(
                 "ネットワーク上に eSCL スキャナが見つかりませんでした（電源・同一Wi-Fi接続をご確認いただくか、IPアドレスを直接指定してください）"
             )
@@ -1419,7 +1654,15 @@ class AppViewModel(QObject):
 
         self._discovered_by_label = {scanner.display_label: scanner for scanner in found}
         self._scanners = list(self._discovered_by_label.keys())
-        self._selected_scanner = self._scanners[0]
+        preferred_label = next(
+            (
+                scanner.display_label
+                for scanner in found
+                if scanner.base_url == self._preferred_scanner_url
+            ),
+            None,
+        )
+        self._selected_scanner = preferred_label or self._scanners[0]
         self.scannerChanged.emit()
         self._load_capabilities_for_selected_scanner()
 
@@ -1448,6 +1691,7 @@ class AppViewModel(QObject):
             if label not in self._scanners or "未検出" in self._scanners[0]:
                 self._scanners = list(self._discovered_by_label.keys())
             self._selected_scanner = label
+            self._preferred_scanner_url = scanner.base_url
             self.scannerChanged.emit()
             self._apply_capabilities(caps)
             max_mm = f"{caps.primary_source.max_width_mm:.0f}×{caps.primary_source.max_height_mm:.0f}mm"
@@ -1466,12 +1710,23 @@ class AppViewModel(QObject):
         try:
             self._preview_session = session_obj
             self._preview_bgr = decode_image_bytes(session_obj.image_bytes)
+            self._active_preview_mode = "full"
+            self._inspect_preview_url = ""
             if self._bleed_through_enabled and self._preview_bgr is not None:
                 filtered = self._maybe_apply_bleed_through(self._preview_bgr)
                 url = self._image_provider.update_image_bgr(filtered)
+                full_thumb_bytes = self._render_thumbnail_bytes(filtered)
             else:
                 url = self._image_provider.update_image_bytes(session_obj.image_bytes)
+                full_thumb_bytes = (
+                    self._render_thumbnail_bytes(self._preview_bgr)
+                    if self._preview_bgr is not None
+                    else session_obj.image_bytes
+                )
             self._preview_image_url = url
+            self._full_preview_thumbnail_url = self._image_provider.set_full_thumbnail_bytes(
+                full_thumb_bytes
+            )
             self._preview_zoom = 1.0
             self.previewZoomChanged.emit()
             self.previewChanged.emit()

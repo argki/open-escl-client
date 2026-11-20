@@ -99,6 +99,7 @@ class UserConfig:
     detection_preset: str = "auto"
     detection_sensitivity: int = 0
     aspect_ratio_preset: str = "auto"
+    lock_crop_aspect_ratio: bool = False
     crop_margin_mm: float = 0.0
     bleed_through_enabled: bool = True
     bleed_through_strength: float = 0.6
@@ -150,6 +151,7 @@ class UserConfig:
         aspect_ratio_preset = _normalize_choice(
             data.get("aspect_ratio_preset"), VALID_ASPECT_RATIO_PRESETS, "auto"
         )
+        lock_crop_aspect_ratio = bool(data.get("lock_crop_aspect_ratio", False))
         crop_margin_mm = round(_clamp_float(data.get("crop_margin_mm", 0.0), 0.0, -10.0, 10.0), 2)
 
         bleed_through_enabled = bool(data.get("bleed_through_enabled", True))
@@ -177,6 +179,7 @@ class UserConfig:
             detection_preset=detection_preset,
             detection_sensitivity=detection_sensitivity,
             aspect_ratio_preset=aspect_ratio_preset,
+            lock_crop_aspect_ratio=lock_crop_aspect_ratio,
             crop_margin_mm=crop_margin_mm,
             bleed_through_enabled=bleed_through_enabled,
             bleed_through_strength=bleed_through_strength,

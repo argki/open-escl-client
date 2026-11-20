@@ -20,12 +20,14 @@ Rectangle {
     readonly property bool showPlacementGuide: paperSizeCombo.hovered || hoveredPaperLabel.length > 0
 
     ScrollView {
+        id: sidebarScrollView
         anchors.fill: parent
         clip: true
         contentWidth: availableWidth
 
         ColumnLayout {
-            width: parent.width
+            id: sidebarColumn
+            width: sidebarScrollView.availableWidth
             spacing: 16
 
             Item { Layout.preferredHeight: 4 }
@@ -34,9 +36,11 @@ Rectangle {
             // セクション 1: スキャナ選択 (mDNS 自動検出 & IP/URL 直接指定)
             // ----------------------------------------------------------------
             GroupBox {
+                objectName: "scannerSelectPanel"
                 title: "1. スキャナ選択 (eSCL / AirScan)"
                 Layout.fillWidth: true
-                Layout.maximumWidth: parent.width - 32
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: sidebarColumn.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
@@ -48,6 +52,7 @@ Rectangle {
                         id: scannerCombo
                         objectName: "scannerCombo"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         model: viewModel ? viewModel.scanners : []
                         currentIndex: {
                             if (!viewModel || !model) return 0
@@ -66,6 +71,7 @@ Rectangle {
                         objectName: "refreshScannerButton"
                         text: "スキャナを再検索 (mDNS / Bonjour)"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         onClicked: {
                             if (viewModel) {
                                 viewModel.refreshScanners()
@@ -76,12 +82,14 @@ Rectangle {
                     // IPアドレス / URL 直接接続（mDNSが届かない環境用フォールバック）
                     RowLayout {
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         spacing: 6
 
                         TextField {
                             id: manualHostField
                             objectName: "manualHostField"
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             placeholderText: "IP または URL (例: 192.168.1.50)"
                             onAccepted: {
                                 if (viewModel && text.length > 0) {
@@ -93,6 +101,7 @@ Rectangle {
                         Button {
                             id: connectManualButton
                             objectName: "connectManualButton"
+                            Layout.minimumWidth: 0
                             text: "接続"
                             onClicked: {
                                 if (viewModel && manualHostField.text.length > 0) {
@@ -108,9 +117,11 @@ Rectangle {
             // セクション 2: 読み取り設定（給紙元・用紙サイズ・解像度）
             // ----------------------------------------------------------------
             GroupBox {
+                objectName: "scanSettingsPanel"
                 title: "2. 読み取り設定（給紙元・サイズ・解像度）"
                 Layout.fillWidth: true
-                Layout.maximumWidth: parent.width - 32
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: sidebarColumn.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
@@ -122,12 +133,16 @@ Rectangle {
                         text: "給紙元（原稿台 / ADF）"
                         font.bold: true
                         color: "#374151"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                     }
 
                     ComboBox {
                         id: inputSourceCombo
                         objectName: "inputSourceCombo"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         model: viewModel ? viewModel.inputSources : []
                         currentIndex: {
                             if (!viewModel || !model) return 0
@@ -145,6 +160,9 @@ Rectangle {
                         text: "用紙サイズ・向き（マウスをかざすと配置図を表示）"
                         font.bold: true
                         color: "#374151"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                     }
 
                     ComboBox {
@@ -152,6 +170,7 @@ Rectangle {
                         objectName: "paperSizeCombo"
                         hoverEnabled: true
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         model: viewModel ? viewModel.paperSizes : []
                         currentIndex: {
                             if (!viewModel || !model) return 0
@@ -189,12 +208,16 @@ Rectangle {
                         text: "プレビュー時の解像度 (DPI)"
                         font.bold: true
                         color: "#374151"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                     }
 
                     ComboBox {
                         id: previewDpiCombo
                         objectName: "previewDpiCombo"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         model: viewModel ? viewModel.previewDpiChoices : []
                         currentIndex: {
                             if (!viewModel || !model) return 0
@@ -212,12 +235,16 @@ Rectangle {
                         text: "保存時の解像度 (DPI)"
                         font.bold: true
                         color: "#374151"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                     }
 
                     ComboBox {
                         id: resolutionCombo
                         objectName: "resolutionCombo"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         model: viewModel ? viewModel.resolutions : []
                         currentIndex: {
                             if (!viewModel || !model) return 0
@@ -238,7 +265,8 @@ Rectangle {
             // ----------------------------------------------------------------
             CropSettingsPanel {
                 Layout.fillWidth: true
-                Layout.maximumWidth: parent.width - 32
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: sidebarColumn.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
             }
@@ -248,7 +276,8 @@ Rectangle {
             // ----------------------------------------------------------------
             BleedThroughPanel {
                 Layout.fillWidth: true
-                Layout.maximumWidth: parent.width - 32
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: sidebarColumn.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
             }
@@ -258,7 +287,8 @@ Rectangle {
             // ----------------------------------------------------------------
             SaveSettingsPanel {
                 Layout.fillWidth: true
-                Layout.maximumWidth: parent.width - 32
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: sidebarColumn.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
             }
@@ -271,7 +301,8 @@ Rectangle {
                 objectName: "resetAllSettingsButton"
                 text: "設定を初期状態にリセット"
                 Layout.fillWidth: true
-                Layout.maximumWidth: parent.width - 32
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: sidebarColumn.width - 32
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
                 onClicked: resetSettingsConfirmDialog.open()

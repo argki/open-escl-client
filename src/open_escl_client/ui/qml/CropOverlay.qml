@@ -9,10 +9,10 @@ Item {
     id: overlayRoot
     objectName: "cropOverlay"
 
-    property var cropBoxes: viewModel ? viewModel.cropBoxes : []
+    property var cropBoxes: viewModel ? viewModel.cropOverlayBoxes : []
     property bool dragging: false
 
-    visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled && viewModel.cropCount > 0) : false
+    visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled && viewModel.cropCount > 0 && !viewModel.isInspectingCrop) : false
 
     onCropBoxesChanged: overlayCanvas.requestPaint()
     onWidthChanged: overlayCanvas.requestPaint()
@@ -77,34 +77,53 @@ Item {
     Repeater {
         id: cropBoxRepeater
         objectName: "cropBoxRepeater"
-        model: overlayRoot.cropBoxes
+        model: overlayRoot.cropBoxes ? overlayRoot.cropBoxes.length : 0
 
         delegate: Item {
             id: boxDelegate
+            objectName: "cropBoxDelegate_" + index
             anchors.fill: parent
+            z: isSelected ? 10 : 0
 
-            readonly property var boxData: modelData
-            readonly property int boxListIndex: boxData.listIndex
-            readonly property bool isSelected: !!boxData.selected
-            readonly property var corners: boxData.cornersNorm || [[0,0],[0,0],[0,0],[0,0]]
-            readonly property int effRot: boxData.effectiveRotationDeg || 0
-            readonly property bool hasManualRot: (boxData.manualRotationDeg !== undefined && boxData.manualRotationDeg >= 0)
+            readonly property int boxListIndex: index
+            readonly property var boxData: (overlayRoot.cropBoxes && index < overlayRoot.cropBoxes.length)
+                ? overlayRoot.cropBoxes[index]
+                : null
+            visible: boxData !== null
+            readonly property int boxDisplayIndex: boxData ? boxData.index : (index + 1)
+            readonly property bool isSelected: boxData ? !!boxData.selected : false
+            readonly property var corners: (boxData && boxData.cornersNorm) ? boxData.cornersNorm : [[0,0],[0,0],[0,0],[0,0]]
+            readonly property int effRot: boxData ? (boxData.effectiveRotationDeg || 0) : 0
+            readonly property bool hasManualRot: boxData ? (boxData.manualRotationDeg !== undefined && boxData.manualRotationDeg >= 0) : false
 
-            // 中心付近の移動ドラッグ領域
-            Rectangle {
+            // 枠の内側全体（回転角を維持した矩形領域）をドラッグして平行移動できる領域
+            Item {
                 id: moveAnchor
-                width: Math.max(28, Math.min(72, (boxData.widthNorm || 0.1) * overlayRoot.width * 0.45))
-                height: Math.max(28, Math.min(72, (boxData.heightNorm || 0.1) * overlayRoot.height * 0.45))
-                x: (boxData.centerXNorm || 0.5) * overlayRoot.width - width / 2
-                y: (boxData.centerYNorm || 0.5) * overlayRoot.height - height / 2
-                radius: 6
-                color: isSelected ? "#222563EB" : "transparent"
-                border.color: isSelected ? "#662563EB" : "transparent"
-                border.width: 1
+                objectName: "cropMoveArea_" + boxDelegate.boxDisplayIndex
+                width: Math.max(24, (boxData ? boxData.widthNorm : 0.1) * overlayRoot.width)
+                height: Math.max(24, (boxData ? boxData.heightNorm : 0.1) * overlayRoot.height)
+                x: (boxData ? boxData.centerXNorm : 0.5) * overlayRoot.width - width / 2
+                y: (boxData ? boxData.centerYNorm : 0.5) * overlayRoot.height - height / 2
+                rotation: boxData ? (boxData.effectiveAngleDeg || 0) : 0
+                transformOrigin: Item.Center
+
+                // 中心付近の控えめな移動視覚マーカー
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: Math.max(24, Math.min(48, parent.width * 0.3))
+                    height: Math.max(24, Math.min(48, parent.height * 0.3))
+                    radius: 6
+                    color: isSelected ? "#222563EB" : "transparent"
+                    border.color: isSelected ? "#662563EB" : "transparent"
+                    border.width: 1
+                }
 
                 MouseArea {
+                    id: moveDragMouseArea
+                    objectName: "cropMoveMouseArea_" + boxDelegate.boxDisplayIndex
                     anchors.fill: parent
-                    cursorShape: Qt.OpenHandCursor
+                    preventStealing: true
+                    cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
                     property real lastX: 0
                     property real lastY: 0
 
@@ -114,6 +133,7 @@ Item {
                         lastY = pt.y
                         overlayRoot.dragging = true
                         if (viewModel) {
+                            viewModel.beginCropDrag(boxDelegate.boxListIndex)
                             viewModel.selectCropBox(boxDelegate.boxListIndex)
                         }
                     }
@@ -125,7 +145,7 @@ Item {
                         var pt = mapToItem(overlayRoot, mouse.x, mouse.y)
                         var dxNorm = (pt.x - lastX) / overlayRoot.width
                         var dyNorm = (pt.y - lastY) / overlayRoot.height
-                        if (Math.abs(dxNorm) > 0.001 || Math.abs(dyNorm) > 0.001) {
+                        if (Math.abs(dxNorm) > 0.0005 || Math.abs(dyNorm) > 0.0005) {
                             lastX = pt.x
                             lastY = pt.y
                             if (viewModel) {
@@ -134,15 +154,25 @@ Item {
                         }
                     }
 
-                    onReleased: overlayRoot.dragging = false
-                    onCanceled: overlayRoot.dragging = false
+                    onReleased: {
+                        overlayRoot.dragging = false
+                        if (viewModel) {
+                            viewModel.endCropDrag(boxDelegate.boxListIndex)
+                        }
+                    }
+                    onCanceled: {
+                        overlayRoot.dragging = false
+                        if (viewModel) {
+                            viewModel.endCropDrag(boxDelegate.boxListIndex)
+                        }
+                    }
                 }
             }
 
             // 通し番号＋自動/手動回転角バッジ（左上頂点付近）
             Rectangle {
                 id: cropBadge
-                objectName: "cropBadge_" + boxData.index
+                objectName: "cropBadge_" + boxDelegate.boxDisplayIndex
                 x: Math.max(4, Math.min(overlayRoot.width - width - 4, corners[0][0] * overlayRoot.width + 4))
                 y: Math.max(4, Math.min(overlayRoot.height - height - 4, corners[0][1] * overlayRoot.height + 4))
                 width: badgeLabel.implicitWidth + 14
@@ -155,7 +185,7 @@ Item {
                 Label {
                     id: badgeLabel
                     anchors.centerIn: parent
-                    text: "#" + boxData.index + "  " + effRot + "°" + (hasManualRot ? " (手動)" : "")
+                    text: "#" + boxDelegate.boxDisplayIndex + "  " + effRot + "°" + (hasManualRot ? " (手動)" : "")
                     font.pixelSize: 11
                     font.bold: true
                     color: "#FFFFFF"
@@ -173,12 +203,15 @@ Item {
             }
 
             // 選択中枠の四隅ドラッグハンドル（TL=0, TR=1, BR=2, BL=3）
+            // model を固定値 4 にして visible で切り替えることでドラッグ中の破棄を防ぐ
             Repeater {
-                model: isSelected ? 4 : 0
+                model: 4
 
                 delegate: Rectangle {
                     id: cornerHandle
-                    objectName: "cropCornerHandle_" + boxData.index + "_" + index
+                    objectName: "cropCornerHandle_" + boxDelegate.boxDisplayIndex + "_" + index
+                    visible: boxDelegate.isSelected && boxDelegate.boxData !== null
+                    z: 2
                     readonly property int cornerIdx: index
                     width: 14
                     height: 14
@@ -192,11 +225,13 @@ Item {
                     MouseArea {
                         anchors.fill: parent
                         anchors.margins: -4
+                        preventStealing: true
                         cursorShape: Qt.SizeAllCursor
 
                         onPressed: {
                             overlayRoot.dragging = true
                             if (viewModel) {
+                                viewModel.beginCropDrag(boxDelegate.boxListIndex)
                                 viewModel.selectCropBox(boxDelegate.boxListIndex)
                             }
                         }
@@ -208,18 +243,30 @@ Item {
                             var pt = mapToItem(overlayRoot, mouse.x, mouse.y)
                             var normX = Math.max(0.0, Math.min(1.0, pt.x / overlayRoot.width))
                             var normY = Math.max(0.0, Math.min(1.0, pt.y / overlayRoot.height))
+                            var shiftLocked = Boolean(mouse.modifiers & Qt.ShiftModifier)
                             if (viewModel) {
                                 viewModel.dragCropCornerToNorm(
                                     boxDelegate.boxListIndex,
                                     cornerHandle.cornerIdx,
                                     normX,
-                                    normY
+                                    normY,
+                                    shiftLocked
                                 )
                             }
                         }
 
-                        onReleased: overlayRoot.dragging = false
-                        onCanceled: overlayRoot.dragging = false
+                        onReleased: {
+                            overlayRoot.dragging = false
+                            if (viewModel) {
+                                viewModel.endCropDrag(boxDelegate.boxListIndex)
+                            }
+                        }
+                        onCanceled: {
+                            overlayRoot.dragging = false
+                            if (viewModel) {
+                                viewModel.endCropDrag(boxDelegate.boxListIndex)
+                            }
+                        }
                     }
                 }
             }

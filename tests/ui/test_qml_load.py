@@ -1011,5 +1011,506 @@ def test_viewmodel_persists_all_settings_and_resets_to_defaults(tmp_path: Path) 
     engine.deleteLater()
 
 
+def test_preview_area_fits_within_window_and_provides_wheel_zoom_and_scrollbars() -> None:
+    """Preview header/footer never overflow right edge at initial/min width; wheel/scroll exist."""
+    import numpy as np
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:450] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+    assert vm.cropCount == 1
+
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+    preview_area = root.findChild(QObject, "previewArea")
+    zoom_row = root.findChild(QObject, "zoomControlsRow")
+    hint_label = root.findChild(QObject, "cropStripHintLabel")
+    wheel_handler = root.findChild(QObject, "previewWheelHandler")
+    v_scroll = root.findChild(QObject, "previewVerticalScrollBar")
+    h_scroll = root.findChild(QObject, "previewHorizontalScrollBar")
+
+    assert preview_area is not None and zoom_row is not None and hint_label is not None
+    assert wheel_handler is not None and v_scroll is not None and h_scroll is not None
+
+    for win_w in (1180, 920):
+        root.setProperty("width", win_w)
+        QCoreApplication.processEvents()
+        pa_w = float(preview_area.property("width"))
+        zoom_right = float(zoom_row.property("x")) + float(zoom_row.property("width")) + 20.0
+        hint_right = float(hint_label.property("x")) + float(hint_label.property("width")) + 28.0
+        assert pa_w > 0.0
+        assert zoom_right <= pa_w + 1.0
+        assert hint_right <= pa_w + 1.0
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+def test_crop_card_click_inspects_document_and_full_card_returns_to_overview() -> None:
+    """Clicking a crop card switches upper canvas to cropped result; fullOverviewCard restores."""
+    import numpy as np
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:450] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+    assert vm.cropCount == 1
+    assert vm.isInspectingCrop is False
+    assert vm.activePreviewMode == "full"
+    assert vm.fullPreviewThumbnailUrl.startswith("image://preview/full_thumb/")
+    full_url = vm.previewImageUrl
+    assert vm.previewImageWidth == 800
+    assert vm.previewImageHeight == 600
+
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+    full_card = root.findChild(QObject, "fullOverviewCard")
+    crop_overlay = root.findChild(QObject, "cropOverlay")
+    title_label = root.findChild(QObject, "previewTitleLabel")
+    assert full_card is not None
+    assert crop_overlay is not None
+    assert title_label is not None
+    assert bool(crop_overlay.property("visible")) is True
+
+    # Inspect cropped document
+    vm.inspectCropPreview(0)
+    QCoreApplication.processEvents()
+    assert vm.isInspectingCrop is True
+    assert vm.activePreviewMode == "crop"
+    assert vm.previewImageUrl.startswith("image://preview/inspect/")
+    assert 0 < vm.previewImageWidth < 800
+    assert 0 < vm.previewImageHeight < 600
+    assert bool(crop_overlay.property("visible")) is False
+    assert "切り出し結果 #1" in str(title_label.property("text"))
+
+    # Live rotation while inspecting refreshes inspect URL
+    prev_inspect_url = vm.previewImageUrl
+    vm.rotateCropBox(0, 90)
+    QCoreApplication.processEvents()
+    assert vm.isInspectingCrop is True
+    assert vm.previewImageUrl != prev_inspect_url
+    assert vm.previewImageUrl.startswith("image://preview/inspect/")
+
+    # Return to full overview
+    vm.showFullPreview()
+    QCoreApplication.processEvents()
+    assert vm.isInspectingCrop is False
+    assert vm.activePreviewMode == "full"
+    assert vm.previewImageUrl == full_url
+    assert vm.previewImageWidth == 800
+    assert vm.previewImageHeight == 600
+    assert bool(crop_overlay.property("visible")) is True
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+def test_crop_drag_session_defers_thumbnail_rebuild_and_supports_aspect_ratio_lock() -> None:
+    """Drag session updates overlay without rebuilding delegates/thumbs and locks aspect ratio."""
+    import math
+
+    import numpy as np
+    import pytest
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[120:480, 200:500] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+    assert vm.cropCount == 1
+
+    engine, _ = create_qml_engine(vm)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+    lock_cb = root.findChild(QObject, "lockAspectRatioCheckBox")
+    crop_overlay = root.findChild(QObject, "cropOverlay")
+    assert lock_cb is not None
+    assert crop_overlay is not None
+
+    def _find_visual_item(item: QObject, target_name: str) -> QObject | None:
+        if item.objectName() == target_name:
+            return item
+        child_items = getattr(item, "childItems", None)
+        if callable(child_items):
+            for ch in child_items():
+                found = _find_visual_item(ch, target_name)
+                if found is not None:
+                    return found
+        return None
+
+    delegate_before = _find_visual_item(crop_overlay, "cropBoxDelegate_0")
+    handle_before = _find_visual_item(crop_overlay, "cropCornerHandle_1_0")
+    assert delegate_before is not None
+    assert handle_before is not None
+
+    overlay_signals = 0
+    boxes_signals = 0
+
+    def _on_overlay() -> None:
+        nonlocal overlay_signals
+        overlay_signals += 1
+
+    def _on_boxes() -> None:
+        nonlocal boxes_signals
+        boxes_signals += 1
+
+    vm.cropOverlayChanged.connect(_on_overlay)
+    vm.cropBoxesChanged.connect(_on_boxes)
+
+    initial_thumb_url = str(vm.cropBoxes[0]["thumbnailUrl"])
+    initial_w = float(vm.cropBoxes[0]["widthPx"])
+    initial_h = float(vm.cropBoxes[0]["heightPx"])
+    initial_ratio = initial_w / initial_h
+
+    # Drag session with Shift-lock (lock_aspect_ratio=True): emits overlay only, preserves delegate
+    vm.beginCropDrag(0)
+    vm.moveCropBoxByNorm(0, 0.03, 0.02)
+    vm.dragCropCornerToNorm(0, 0, 0.15, 0.10, True)
+    vm.dragCropCornerToNorm(0, 0, 0.10, 0.14, True)
+    QCoreApplication.processEvents()
+
+    assert overlay_signals == 3
+    assert boxes_signals == 0
+    assert str(vm.cropBoxes[0]["thumbnailUrl"]) == initial_thumb_url
+    delegate_during = _find_visual_item(crop_overlay, "cropBoxDelegate_0")
+    handle_during = _find_visual_item(crop_overlay, "cropCornerHandle_1_0")
+    assert delegate_during is delegate_before
+    assert handle_during is handle_before
+
+    new_w = float(vm.cropOverlayBoxes[0]["widthPx"])
+    new_h = float(vm.cropOverlayBoxes[0]["heightPx"])
+    assert (new_w / new_h) == pytest.approx(initial_ratio, abs=0.02)
+
+    # End drag commits once and rebuilds thumbnail
+    vm.endCropDrag(0)
+    QCoreApplication.processEvents()
+    assert boxes_signals == 1
+    assert str(vm.cropBoxes[0]["thumbnailUrl"]) != initial_thumb_url
+
+    # Property toggle lockCropAspectRatio works even when default preset is auto
+    vm.lockCropAspectRatio = True
+    assert vm.lockCropAspectRatio is True
+    box_before = vm.cropBoxes[0]
+    ratio_before_toggle_drag = float(box_before["widthPx"]) / float(box_before["heightPx"])
+    vm.beginCropDrag(0)
+    vm.dragCropCornerToNorm(0, 2, 0.90, 0.70, False)
+    vm.endCropDrag(0)
+    box_after = vm.cropBoxes[0]
+    ratio_after_toggle_drag = float(box_after["widthPx"]) / float(box_after["heightPx"])
+    assert ratio_after_toggle_drag == pytest.approx(ratio_before_toggle_drag, abs=0.02)
+
+    # Fixed preset (ISO A/B) enforces 1:sqrt(2) automatically even if lockCropAspectRatio is False
+    vm.lockCropAspectRatio = False
+    iso_label = next(lbl for lbl in vm.aspectRatioPresets if "A判" in lbl)
+    vm.selectedCropAspectRatioPreset = iso_label
+    vm.beginCropDrag(0)
+    vm.dragCropCornerToNorm(0, 2, 0.85, 0.92, False)
+    vm.endCropDrag(0)
+    fixed_w = float(vm.cropBoxes[0]["widthPx"])
+    fixed_h = float(vm.cropBoxes[0]["heightPx"])
+    long_short = max(fixed_w, fixed_h) / min(fixed_w, fixed_h)
+    assert long_short == pytest.approx(math.sqrt(2.0), abs=0.02)
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+def test_sidebar_panels_fit_within_groupbox_and_zoom_centers_on_pointer() -> None:
+    """Sidebar GroupBox panels never overflow horizontally and wheel zoom keeps pointer fixed."""
+    import numpy as np
+    import pytest
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:450] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+
+    engine, _ = create_qml_engine(vm)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+
+    panel_names = (
+        "scannerSelectPanel",
+        "scanSettingsPanel",
+        "cropSettingsPanel",
+        "bleedThroughPanel",
+        "saveSettingsPanel",
+    )
+    for win_w in (1180, 920):
+        root.setProperty("width", win_w)
+        QCoreApplication.processEvents()
+        for name in panel_names:
+            gb = root.findChild(QObject, name)
+            assert gb is not None
+            avail = float(gb.property("availableWidth"))
+            col = gb.property("contentItem").childItems()[0]
+            assert float(col.property("width")) <= avail + 0.5
+            for child in col.childItems():
+                right = float(child.property("x")) + float(child.property("width"))
+                assert right <= avail + 0.5, f"{name} child overflowed at w={win_w}"
+
+    # Verify real QWheelEvent preserves target point across multiple zoom-in / zoom-out steps
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    preview_area = root.findChild(QObject, "previewArea")
+    flickable = root.findChild(QObject, "previewFlickable")
+    assert preview_area is not None and flickable is not None
+    vw = float(flickable.property("width"))
+    vh = float(flickable.property("height"))
+    vx, vy = vw * 0.8, vh * 0.75
+    scene_pt = flickable.mapToScene(QPointF(vx, vy))
+
+    for expected_zoom in (1.25, 1.5, 1.75, 2.0):
+        ev = QWheelEvent(
+            scene_pt,
+            scene_pt,
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        QGuiApplication.sendEvent(root, ev)
+        QCoreApplication.processEvents()
+        assert vm.previewZoom == pytest.approx(expected_zoom, abs=1e-6)
+        cx = float(flickable.property("contentX"))
+        cy = float(flickable.property("contentY"))
+        cw = float(flickable.property("contentWidth"))
+        ch = float(flickable.property("contentHeight"))
+        assert (cx + vx) / cw == pytest.approx(0.8, abs=1e-3)
+        assert (cy + vy) / ch == pytest.approx(0.75, abs=1e-3)
+
+    for expected_zoom in (1.75, 1.5, 1.25, 1.0):
+        ev = QWheelEvent(
+            scene_pt,
+            scene_pt,
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        QGuiApplication.sendEvent(root, ev)
+        QCoreApplication.processEvents()
+        assert vm.previewZoom == pytest.approx(expected_zoom, abs=1e-6)
+        cx = float(flickable.property("contentX"))
+        cy = float(flickable.property("contentY"))
+        cw = float(flickable.property("contentWidth"))
+        ch = float(flickable.property("contentHeight"))
+        assert (cx + vx) / cw == pytest.approx(0.8, abs=1e-3)
+        assert (cy + vy) / ch == pytest.approx(0.75, abs=1e-3)
+
+    assert float(flickable.property("contentX")) == pytest.approx(0.0, abs=1.0)
+    assert float(flickable.property("contentY")) == pytest.approx(0.0, abs=1.0)
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+def test_crop_interior_move_area_and_full_restart_persistence(tmp_path: Path) -> None:
+    """Crop box interior drag area matches full box bounds and all sidebar settings persist."""
+    import numpy as np
+    import pytest
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:550] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    cfg_path = tmp_path / "restart_config.json"
+    store1 = UserConfigStore(cfg_path)
+    vm1 = AppViewModel(
+        config_store=store1,
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm1.addManualScanner("192.168.1.50")
+    vm1.requestPreview()
+    assert vm1.cropCount == 1
+
+    # Verify QML cropMoveArea covers full box interior rather than only a small center square
+    engine, _ = create_qml_engine(vm1)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+    crop_overlay = root.findChild(QObject, "cropOverlay")
+    assert crop_overlay is not None
+
+    def _find_visual_item(item: QObject, target_name: str) -> QObject | None:
+        if item.objectName() == target_name:
+            return item
+        child_items = getattr(item, "childItems", None)
+        if callable(child_items):
+            for ch in child_items():
+                found = _find_visual_item(ch, target_name)
+                if found is not None:
+                    return found
+        return None
+
+    move_area = _find_visual_item(crop_overlay, "cropMoveArea_1")
+    assert move_area is not None
+    ov_w = float(crop_overlay.property("width"))
+    ov_h = float(crop_overlay.property("height"))
+    box0 = vm1.cropOverlayBoxes[0]
+    assert float(move_area.property("width")) == pytest.approx(
+        float(box0["widthNorm"]) * ov_w, abs=1.0
+    )
+    assert float(move_area.property("height")) == pytest.approx(
+        float(box0["heightNorm"]) * ov_h, abs=1.0
+    )
+    assert float(move_area.property("rotation")) == pytest.approx(
+        float(box0["effectiveAngleDeg"]), abs=1e-4
+    )
+
+    # Change settings INCLUDING scanner-specific 1200 DPI, lockCropAspectRatio,
+    # and sensitivity/aspect ratio while a crop box is selected.
+    vm1.selectedResolution = 1200
+    vm1.selectedPreviewDpi = 200
+    vm1.lockCropAspectRatio = True
+    vm1.selectedCropSensitivity = 2
+    iso_label = next(lbl for lbl in vm1.aspectRatioPresets if "A判" in lbl)
+    vm1.selectedCropAspectRatioPreset = iso_label
+    vm1.bleedThroughEnabled = False
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+    # Restart simulation: empty mDNS list should fall back to last_scanner_url,
+    # preserving 1200 DPI and all sidebar settings.
+    mock_discovery_empty = MagicMock()
+    mock_discovery_empty.discover.return_value = []
+    store2 = UserConfigStore(cfg_path)
+    vm2 = AppViewModel(
+        config_store=store2,
+        discovery_service=mock_discovery_empty,
+        capabilities_fetcher=mock_fetcher,
+    )
+    assert vm2.lockCropAspectRatio is True
+    assert vm2.detectionSensitivity == 2
+    assert vm2.selectedCropAspectRatioPreset == iso_label
+    assert vm2.bleedThroughEnabled is False
+
+    # Even if another setting changes before scanner discovery completes, 1200 DPI & URL survive
+    vm2.bleedThroughEnabled = True
+    vm2.refreshScanners()
+    assert "192.168.1.50" in vm2.selectedScanner
+    assert vm2.selectedResolution == 1200
+    assert vm2.selectedPreviewDpi == 200
+    assert vm2.lockCropAspectRatio is True
+    assert vm2.detectionSensitivity == 2
+    assert vm2.selectedCropAspectRatioPreset == iso_label
+    assert vm2.bleedThroughEnabled is True
+
+
+
+
+
+
+
 
 

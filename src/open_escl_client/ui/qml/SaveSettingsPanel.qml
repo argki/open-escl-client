@@ -40,18 +40,28 @@ GroupBox {
             text: "デフォルト保存先フォルダ"
             font.bold: true
             color: "#374151"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            elide: Text.ElideRight
         }
 
         RowLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             spacing: 6
 
             TextField {
                 id: saveDirField
                 objectName: "saveDirField"
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 text: viewModel ? viewModel.saveDirectory : ""
                 placeholderText: "~/Pictures/Scans"
+                onTextEdited: {
+                    if (viewModel && text.trim().length > 0) {
+                        viewModel.saveDirectory = text
+                    }
+                }
                 onEditingFinished: {
                     if (viewModel) {
                         viewModel.saveDirectory = text
@@ -62,6 +72,7 @@ GroupBox {
             Button {
                 id: chooseFolderButton
                 objectName: "chooseFolderButton"
+                Layout.minimumWidth: 0
                 text: "参照..."
                 onClicked: saveFolderDialog.open()
             }
@@ -74,12 +85,16 @@ GroupBox {
             text: "ネーミングルール（{date} / {time} / {seq:03d}）"
             font.bold: true
             color: "#374151"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            elide: Text.ElideRight
         }
 
         TextField {
             id: namingRuleField
             objectName: "namingRuleField"
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             text: viewModel ? viewModel.namingRule : ""
             placeholderText: "Scan_{date}_{time}_{seq:03d}"
             onTextEdited: {
@@ -96,6 +111,7 @@ GroupBox {
 
         Rectangle {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             implicitHeight: previewFileRow.implicitHeight + 10
             radius: 4
             color: "#F3F4F6"
@@ -118,6 +134,8 @@ GroupBox {
                     id: nextFilenamePreviewLabel
                     objectName: "nextFilenamePreviewLabel"
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    Layout.preferredWidth: 0
                     text: viewModel ? viewModel.nextFilenamePreview : ""
                     font.pixelSize: 11
                     font.bold: true
@@ -134,12 +152,16 @@ GroupBox {
             text: "保存ファイル形式"
             font.bold: true
             color: "#374151"
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            elide: Text.ElideRight
         }
 
         ComboBox {
             id: saveFormatCombo
             objectName: "saveFormatCombo"
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             model: viewModel ? viewModel.saveFormats : []
             currentIndex: {
                 if (!viewModel || !model) return 0
@@ -158,6 +180,7 @@ GroupBox {
         // --------------------------------------------------------------------
         RowLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
 
             Label {
                 text: viewModel && viewModel.selectedSaveFormat === "PNG"
@@ -165,9 +188,10 @@ GroupBox {
                       : "圧縮品質 (JPEG / PDF画質)"
                 font.bold: true
                 color: "#374151"
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                elide: Text.ElideRight
             }
-
-            Item { Layout.fillWidth: true }
 
             Label {
                 objectName: "jpegQualityValueLabel"
@@ -181,6 +205,7 @@ GroupBox {
             id: jpegQualitySlider
             objectName: "jpegQualitySlider"
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             from: 10
             to: 100
             stepSize: 5
@@ -199,9 +224,10 @@ GroupBox {
             id: multipagePdfCheckBox
             objectName: "multipagePdfCheckBox"
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             visible: viewModel ? viewModel.selectedSaveFormat === "PDF" : true
             checked: viewModel ? viewModel.multipagePdf : false
-            text: "連続スキャンを1つのPDFにまとめる"
+            text: "連続スキャンを1つのPDFに結合"
             onToggled: {
                 if (viewModel) {
                     viewModel.multipagePdf = checked

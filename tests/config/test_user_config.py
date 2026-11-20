@@ -52,6 +52,7 @@ def test_user_config_store_roundtrip_and_validation(tmp_path: Path) -> None:
         detection_preset="standard_sheet",
         detection_sensitivity=3,
         aspect_ratio_preset="iso_a_b",
+        lock_crop_aspect_ratio=True,
         crop_margin_mm=-1.5,
         bleed_through_enabled=False,
         bleed_through_strength=0.85,
@@ -77,6 +78,7 @@ def test_user_config_store_roundtrip_and_validation(tmp_path: Path) -> None:
     assert reloaded.detection_preset == "standard_sheet"
     assert reloaded.detection_sensitivity == 3
     assert reloaded.aspect_ratio_preset == "iso_a_b"
+    assert reloaded.lock_crop_aspect_ratio is True
     assert reloaded.crop_margin_mm == -1.5
     assert reloaded.bleed_through_enabled is False
     assert reloaded.bleed_through_strength == 0.85
