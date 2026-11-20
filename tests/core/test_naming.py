@@ -135,3 +135,60 @@ def test_expanded_export_format_extensions_and_filenames() -> None:
         engine.render_filename("Doc_{seq:03d}", seq=4, file_format="GIF", now=FIXED_NOW)
         == "Doc_004.gif"
     )
+
+
+def test_ocr_tokens_expand_and_collapse_empty_separators_cleanly() -> None:
+    from open_escl_client.core.naming import template_has_ocr_tokens
+
+    engine = FileNamingEngine()
+    template = "{ocr_date}_{ocr_title}_{seq:03d}"
+    assert template_has_ocr_tokens(template) is True
+    assert template_has_ocr_tokens(DEFAULT_NAMING_TEMPLATE) is False
+
+    # Full OCR tokens present
+    assert (
+        engine.render_filename(
+            template,
+            seq=1,
+            file_format="PDF",
+            now=FIXED_NOW,
+            extra_tokens={"ocr_date": "20261120", "ocr_title": "御請求書"},
+        )
+        == "20261120_御請求書_001.pdf"
+    )
+
+    # Missing date collapses leading underscore cleanly
+    assert (
+        engine.render_filename(
+            template,
+            seq=2,
+            file_format="PDF",
+            now=FIXED_NOW,
+            extra_tokens={"ocr_date": "", "ocr_title": "領収書"},
+        )
+        == "領収書_002.pdf"
+    )
+
+    # Missing title collapses double underscore cleanly
+    assert (
+        engine.render_filename(
+            template,
+            seq=3,
+            file_format="PDF",
+            now=FIXED_NOW,
+            extra_tokens={"ocr_date": "20261120", "ocr_title": ""},
+        )
+        == "20261120_003.pdf"
+    )
+
+    # Template with ONLY empty OCR tokens falls back safely to default naming template
+    assert (
+        engine.render_filename(
+            "{ocr_date}_{ocr_title}",
+            seq=5,
+            file_format="PDF",
+            now=FIXED_NOW,
+            extra_tokens={"ocr_date": "", "ocr_title": ""},
+        )
+        == "Scan_20261118_080509_005.pdf"
+    )

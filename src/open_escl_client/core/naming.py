@@ -52,6 +52,29 @@ def template_has_sequence_token(template: str) -> bool:
     return False
 
 
+_OCR_TOKEN_NAMES: frozenset[str] = frozenset({"ocr_title", "ocr_date", "ocr_summary"})
+
+
+def template_has_ocr_tokens(template: str) -> bool:
+    """Return True if the naming template references any `{ocr_*}` placeholder."""
+    try:
+        for _literal, field_name, _spec, _conv in Formatter().parse(template):
+            if field_name in _OCR_TOKEN_NAMES:
+                return True
+    except ValueError:
+        return False
+    return False
+
+
+def _clean_ocr_rendered_stem(rendered: str) -> str:
+    """Collapse leftover duplicate separators when an OCR token expanded to empty string."""
+    cleaned = re.sub(r"_{2,}", "_", rendered)
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    cleaned = re.sub(r"[_-]{2,}", "_", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" _-.")
+
+
 class _SafeFormatDict(dict[str, object]):
     """Dictionary that preserves unknown `{token}` placeholders instead of raising `KeyError`."""
 
@@ -87,6 +110,9 @@ class FileNamingEngine:
             "MM": ts.strftime("%M"),
             "SS": ts.strftime("%S"),
             "seq": max(1, int(seq)),
+            "ocr_title": "",
+            "ocr_date": "",
+            "ocr_summary": "",
         }
         if extra_tokens:
             tokens.update(extra_tokens)
@@ -115,6 +141,13 @@ class FileNamingEngine:
         # Avoid double extension if the user already wrote `.pdf` / `.jpg` / `.png` in the template
         if rendered.lower().endswith(ext):
             rendered = rendered[: -len(ext)]
+
+        if template_has_ocr_tokens(effective_template) and any(
+            not str(tokens.get(name, "")).strip() for name in _OCR_TOKEN_NAMES
+        ):
+            rendered = _clean_ocr_rendered_stem(rendered)
+            if not rendered:
+                rendered = self.default_template.format_map(_SafeFormatDict(tokens))
 
         stem = sanitize_filename_stem(rendered)
         return f"{stem}{ext}"

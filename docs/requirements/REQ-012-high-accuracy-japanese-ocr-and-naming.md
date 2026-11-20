@@ -75,7 +75,7 @@ feat(imaging): 日本語高精度OCRエンジン抽象化レイヤーとmacOS Vi
 
 ### タスク 2: OCR 結果からの文書タイトル・日付抽出ロジックと `FileNamingEngine` トークン拡張
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/core/ocr_naming.py` を追加し、`OcrResult` の行テキスト・文字高さ・位置・日付パターン（和暦 `令和X年Y月Z日` / 西暦 `YYYY年M月D日` / `YYYY/MM/DD` 等）から `ocr_title`（見出し・主要帳票キーワード）と `ocr_date`（`YYYYMMDD`）を抽出し、ファイル名禁止文字をサニタイズする `OcrNamingExtractor` を実装する
   - `src/open_escl_client/core/naming.py` の `FileNamingEngine` を拡張し、`{ocr_title}` や `{ocr_date}` トークン（未抽出時はフォールバックで空文字整理や既定値にフォールバックし二重アンダースコア `__` 等を整形）を展開できるようにする
