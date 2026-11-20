@@ -94,6 +94,31 @@ _PURE_NUMERIC_OR_SYMBOL_RE = re.compile(r"^[\d\s,./:\-+¥￥$円%()（）\[\]【
 _SUMMARY_ORG_HINT_RE = re.compile(
     r"(株式会社|有限会社|合同会社|商店|医院|病院|クリニック|薬局|市役所|区役所|銀行|支店|御中)"
 )
+_STAMP_BADGE_WORDS: frozenset[str] = frozenset(
+    {
+        "親展",
+        "重要",
+        "至急",
+        "極秘",
+        "秘",
+        "社外秘",
+        "取扱注意",
+        "控",
+        "控え",
+        "写",
+        "写し",
+        "原本",
+        "再発行",
+        "丸秘",
+        "COPY",
+        "URGENT",
+        "CONFIDENTIAL",
+        "DRAFT",
+        "SAMPLE",
+    }
+)
+_CONTACT_OR_ADDR_RE = re.compile(r"(?:TEL|FAX|〒|https?://|^\d{3}-\d{4}|振込先|口座番号)", re.I)
+_ADDRESSEE_SUFFIX_RE = re.compile(r"(?:御中|様|殿)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +205,31 @@ def _clean_title_candidate(raw: str, max_len: int) -> str:
     return sanitized
 
 
+def _effective_char_height(
+    block: OcrTextBlock,
+    *,
+    image_width: int = 0,
+    image_height: int = 0,
+) -> float:
+    """Estimate single-line character height in normalized Y units (handles multi-line/vertical)."""
+    raw = _nfkc(block.text)
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    n_lines = max(1, len(lines))
+    h = max(1e-4, float(block.height_norm)) / float(n_lines)
+    w = max(0.0, float(block.bbox.width))
+
+    non_ws_len = len(re.sub(r"\s+", "", raw))
+    if n_lines == 1 and non_ws_len >= 3 and w > 0.0:
+        if image_width > 0 and image_height > 0:
+            px_h = h * float(image_height)
+            px_w = w * float(image_width)
+            if px_h > px_w * 1.6:
+                return max(1e-4, px_w / float(image_height))
+        elif h > w * 2.0:
+            return max(1e-4, w)
+    return h
+
+
 def _is_date_only_line(line: str) -> bool:
     normalized = _nfkc(line)
     found = _extract_date_from_line(normalized)
@@ -206,7 +256,11 @@ class OcrNamingExtractor:
             return OcrNamingMetadata()
 
         ocr_date, raw_date = self._extract_best_date(ocr_result.blocks)
-        title_block, ocr_title = self._extract_best_title(ocr_result.blocks)
+        title_block, ocr_title = self._extract_best_title(
+            ocr_result.blocks,
+            image_width=ocr_result.image_width,
+            image_height=ocr_result.image_height,
+        )
         ocr_summary = self._extract_summary(ocr_result.blocks, excluded_block=title_block)
 
         return OcrNamingMetadata(
@@ -235,44 +289,115 @@ class OcrNamingExtractor:
     def _extract_best_title(
         self,
         blocks: tuple[OcrTextBlock, ...],
+        *,
+        image_width: int = 0,
+        image_height: int = 0,
     ) -> tuple[OcrTextBlock | None, str]:
-        heights = sorted(max(1e-4, b.height_norm) for b in blocks)
-        median_h = heights[len(heights) // 2]
+        char_heights = [
+            _effective_char_height(b, image_width=image_width, image_height=image_height)
+            for b in blocks
+        ]
+        sorted_heights = sorted(char_heights)
+        median_h = sorted_heights[len(sorted_heights) // 2]
 
-        best_score = float("-inf")
-        best_block: OcrTextBlock | None = None
-        best_title = ""
+        valid_strokes = sorted(
+            b.stroke_width_norm
+            for b in blocks
+            if b.stroke_width_norm > 0.0 and b.ink_ratio <= 0.72
+        )
+        median_stroke = valid_strokes[len(valid_strokes) // 2] if valid_strokes else 0.0
 
-        for idx, block in enumerate(blocks):
+        valid_weights = sorted(
+            b.stroke_width_norm / max(1e-4, ch)
+            for b, ch in zip(blocks, char_heights, strict=True)
+            if b.stroke_width_norm > 0.0 and b.ink_ratio <= 0.72
+        )
+        median_weight = valid_weights[len(valid_weights) // 2] if valid_weights else 0.0
+
+        candidates: list[tuple[OcrTextBlock, str, str, float, bool]] = []
+        for block, ch in zip(blocks, char_heights, strict=True):
             raw = _nfkc(block.text)
             if not raw or _is_date_only_line(raw):
                 continue
             cleaned = _clean_title_candidate(raw, self.max_title_length)
             if len(cleaned) < 2:
                 continue
+            is_auxiliary = (
+                cleaned.upper() in _STAMP_BADGE_WORDS
+                or cleaned in _STAMP_BADGE_WORDS
+                or bool(_CONTACT_OR_ADDR_RE.search(raw))
+                or bool(_ADDRESSEE_SUFFIX_RE.search(raw))
+            )
+            candidates.append((block, raw, cleaned, ch, is_auxiliary))
 
+        if not candidates:
+            return None, ""
+
+        primary_candidates = [c for c in candidates if not c[4]] or candidates
+        max_h = max(c[3] for c in primary_candidates)
+        max_stroke = max(
+            (
+                c[0].stroke_width_norm
+                for c in primary_candidates
+                if c[0].stroke_width_norm > 0.0 and c[0].ink_ratio <= 0.72
+            ),
+            default=0.0,
+        )
+
+        best_score = float("-inf")
+        best_block: OcrTextBlock | None = None
+        best_title = ""
+
+        for block, raw, cleaned, char_h, _is_aux in candidates:
             score = 0.0
-            # Prominent text height (typical document heading)
-            rel_height = block.height_norm / max(1e-4, median_h)
-            score += min(3.5, rel_height * 1.4)
 
-            # Upper area of the page
-            if block.bbox.y <= 0.30:
-                score += 2.0 - block.bbox.y * 3.0
-            elif block.bbox.y > 0.65:
-                score -= 1.2
+            # Font height is the primary signal (uncapped relative prominence + ratio to page max).
+            rel_height = char_h / max(1e-4, median_h)
+            ratio_to_max_h = min(1.2, char_h / max(1e-4, max_h))
+            score += min(14.0, (rel_height**1.15) * 3.0)
+            score += (ratio_to_max_h**1.5) * 5.0
 
-            # High-signal Japanese/English document type keyword match
-            if any(kw in raw for kw in _DOCUMENT_TYPE_KEYWORDS):
-                score += 4.5
+            # Font stroke thickness & relative boldness weight (when measured from source image).
+            if (
+                median_stroke > 0.0
+                and max_stroke > 0.0
+                and block.stroke_width_norm > 0.0
+                and block.ink_ratio <= 0.72
+            ):
+                rel_stroke = block.stroke_width_norm / max(1e-5, median_stroke)
+                ratio_to_max_s = min(1.2, block.stroke_width_norm / max(1e-5, max_stroke))
+                score += min(8.0, (rel_stroke**1.1) * 2.0)
+                score += (ratio_to_max_s**1.3) * 3.5
+
+                if median_weight > 0.0:
+                    weight = block.stroke_width_norm / max(1e-4, char_h)
+                    rel_weight = weight / median_weight
+                    score += max(-0.8, min(3.0, (rel_weight - 1.0) * 2.5))
+
+            # Gentle layout bias: prefer upper/upper-middle headings, penalize bottom footers.
+            if block.bbox.y <= 0.45:
+                score += 1.2 - block.bbox.y * 1.5
+            elif block.bbox.y > 0.70:
+                score -= 1.8
+
+            # Secondary tie-breakers (must not override larger bold titles).
+            has_doc_kw = any(kw in raw for kw in _DOCUMENT_TYPE_KEYWORDS)
+            if has_doc_kw:
+                score += 2.0
             if _TITLE_PREFIX_RE.match(raw):
-                score += 3.2
-            if any(kw in raw for kw in ("TEL", "FAX", "〒", "http://", "https://")):
-                score -= 3.5
-            if len(raw) > 40:
-                score -= 1.5
-            if idx == 0:
-                score += 0.4
+                score += 2.2
+
+            if cleaned in _STAMP_BADGE_WORDS or cleaned.upper() in _STAMP_BADGE_WORDS:
+                score -= 6.0
+            if _CONTACT_OR_ADDR_RE.search(raw):
+                score -= 4.5
+            if _ADDRESSEE_SUFFIX_RE.search(raw):
+                score -= 3.0
+            if len(cleaned) == 2 and not has_doc_kw:
+                score -= 0.8
+            if len(raw) > 45 or "。" in raw:
+                score -= 2.5
+
             score += float(block.confidence) * 0.5
 
             if score > best_score:

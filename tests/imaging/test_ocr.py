@@ -194,3 +194,91 @@ def test_macos_vision_ocr_recognizes_japanese_invoice_with_layout() -> None:
     title_block = next(b for b in res.blocks if "請求" in b.text)
     assert title_block.bbox.y < 0.25
     assert title_block.height_norm > 0.02
+    assert title_block.stroke_width_norm > 0.0
+
+
+def test_engine_measures_larger_stroke_width_for_bold_large_text() -> None:
+    img = Image.new("RGB", (800, 1000), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    jp_font_paths = (
+        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+    )
+    small_thin = _find_font(jp_font_paths, 22)
+    large_bold = _find_font(jp_font_paths, 54)
+    if small_thin is None or large_bold is None:
+        pytest.skip("System Japanese font not available")
+
+    draw.text((60, 60), "請求書発行のお知らせ", fill=(20, 20, 20), font=small_thin)
+    draw.text(
+        (60, 180),
+        "電気料金確定ご報告",
+        fill=(10, 10, 10),
+        font=large_bold,
+        stroke_width=2,
+        stroke_fill=(10, 10, 10),
+    )
+    bgr = np.array(img, dtype=np.uint8)[:, :, ::-1].copy()
+
+    fake = _FakeOcrBackend(
+        "fake_layout",
+        blocks=(
+            OcrTextBlock(
+                text="請求書発行のお知らせ",
+                bbox=OcrBoundingBox(x=0.06, y=0.05, width=0.40, height=0.035),
+                confidence=0.95,
+            ),
+            OcrTextBlock(
+                text="電気料金確定ご報告",
+                bbox=OcrBoundingBox(x=0.06, y=0.17, width=0.70, height=0.080),
+                confidence=0.95,
+            ),
+        ),
+    )
+    res = JapaneseOcrEngine(backends=[fake]).recognize(bgr)
+    assert len(res.blocks) == 2
+    assert res.blocks[1].stroke_width_norm > res.blocks[0].stroke_width_norm * 1.5
+
+
+@pytest.mark.skipif(
+    platform.system() != "Darwin" or not MacOSVisionOcrBackend().is_available(),
+    reason="macOS Vision OCR backend requires macOS with swiftc",
+)
+def test_macos_vision_and_extractor_select_bold_large_title_over_small_keyword() -> None:
+    from open_escl_client.core.ocr_naming import OcrNamingExtractor
+
+    img = Image.new("RGB", (900, 1200), (252, 252, 250))
+    draw = ImageDraw.Draw(img)
+    thin_paths = (
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    )
+    bold_paths = (
+        "/System/Library/Fonts/ヒラギノ角ゴシック W8.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+    )
+    small_font = _find_font(thin_paths, 24)
+    bold_title_font = _find_font(bold_paths, 62)
+    if small_font is None or bold_title_font is None:
+        pytest.skip("System Japanese fonts not available")
+
+    draw.text((70, 60), "請求書発行のお知らせ", fill=(30, 30, 30), font=small_font)
+    draw.text((70, 110), "発行日 2026年11月20日", fill=(30, 30, 30), font=small_font)
+    draw.text(
+        (70, 220),
+        "電気料金ご契約内容",
+        fill=(10, 10, 10),
+        font=bold_title_font,
+        stroke_width=2,
+        stroke_fill=(10, 10, 10),
+    )
+    bgr = np.array(img, dtype=np.uint8)[:, :, ::-1].copy()
+
+    res = JapaneseOcrEngine(backends=[MacOSVisionOcrBackend()]).recognize(bgr)
+    meta = OcrNamingExtractor().extract(res)
+    assert meta.ocr_title == "電気料金ご契約内容"
+    assert meta.ocr_date == "20261120"

@@ -104,3 +104,98 @@ def test_handles_empty_or_unrecognized_ocr_safely() -> None:
     meta_num = extractor.extract(numeric_only)
     assert meta_num.ocr_title == ""
     assert meta_num.ocr_date == ""
+
+
+def test_prefers_larger_and_bolder_font_over_smaller_keyword_lines() -> None:
+    # Small upper keyword lines must not beat a much larger and bolder main title.
+    ocr = OcrResult(
+        blocks=(
+            OcrTextBlock(
+                text="請求書発行のお知らせ",
+                bbox=OcrBoundingBox(x=0.08, y=0.06, width=0.35, height=0.018),
+                confidence=0.98,
+                stroke_width_norm=0.0018,
+                ink_ratio=0.14,
+            ),
+            OcrTextBlock(
+                text="件名: 振込明細",
+                bbox=OcrBoundingBox(x=0.08, y=0.10, width=0.28, height=0.020),
+                confidence=0.97,
+                stroke_width_norm=0.0020,
+                ink_ratio=0.16,
+            ),
+            OcrTextBlock(
+                text="親展",
+                bbox=OcrBoundingBox(x=0.78, y=0.08, width=0.12, height=0.065),
+                confidence=0.95,
+                stroke_width_norm=0.0080,
+                ink_ratio=0.38,
+            ),
+            OcrTextBlock(
+                text="株式会社サンプル 御中",
+                bbox=OcrBoundingBox(x=0.08, y=0.15, width=0.45, height=0.030),
+                confidence=0.96,
+                stroke_width_norm=0.0028,
+                ink_ratio=0.18,
+            ),
+            OcrTextBlock(
+                text="年間電気料金ご契約プラン変更のご案内",
+                bbox=OcrBoundingBox(x=0.10, y=0.22, width=0.78, height=0.052),
+                confidence=0.93,
+                stroke_width_norm=0.0072,
+                ink_ratio=0.34,
+            ),
+            # Vertical narrow margin note with large bbox.height but small character width
+            OcrTextBlock(
+                text="このお知らせは大切に保管してください",
+                bbox=OcrBoundingBox(x=0.92, y=0.20, width=0.022, height=0.38),
+                confidence=0.92,
+                stroke_width_norm=0.0016,
+                ink_ratio=0.15,
+            ),
+        ),
+        full_text="",
+        backend_name="mock_ocr",
+        image_width=1000,
+        image_height=1400,
+        applied=True,
+    )
+
+    meta = OcrNamingExtractor().extract(ocr)
+    assert meta.ocr_title == "年間電気料金ご契約プラン変更のご案内"
+
+
+def test_prefers_bolder_stroke_when_heights_are_comparable() -> None:
+    ocr = OcrResult(
+        blocks=(
+            OcrTextBlock(
+                text="利用控え",
+                bbox=OcrBoundingBox(x=0.10, y=0.08, width=0.25, height=0.040),
+                confidence=0.96,
+                stroke_width_norm=0.0020,
+                ink_ratio=0.12,
+            ),
+            OcrTextBlock(
+                text="固定資産税納税通知",
+                bbox=OcrBoundingBox(x=0.10, y=0.18, width=0.60, height=0.038),
+                confidence=0.95,
+                stroke_width_norm=0.0075,
+                ink_ratio=0.38,
+            ),
+            OcrTextBlock(
+                text="発行日 2026年11月20日",
+                bbox=OcrBoundingBox(x=0.10, y=0.30, width=0.40, height=0.020),
+                confidence=0.95,
+                stroke_width_norm=0.0020,
+                ink_ratio=0.14,
+            ),
+        ),
+        full_text="",
+        backend_name="mock_ocr",
+        image_width=1000,
+        image_height=1400,
+        applied=True,
+    )
+
+    meta = OcrNamingExtractor().extract(ocr)
+    assert meta.ocr_title == "固定資産税納税通知"

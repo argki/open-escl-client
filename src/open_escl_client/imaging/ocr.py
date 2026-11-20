@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -58,6 +58,8 @@ class OcrTextBlock:
     text: str
     bbox: OcrBoundingBox
     confidence: float
+    stroke_width_norm: float = 0.0
+    ink_ratio: float = 0.0
 
     @property
     def height_norm(self) -> float:
@@ -132,6 +134,88 @@ def _sort_blocks_reading_order(blocks: Sequence[OcrTextBlock]) -> tuple[OcrTextB
     return tuple(ordered)
 
 
+def _measure_block_visual_metrics(
+    gray: np.ndarray,
+    bbox: OcrBoundingBox,
+) -> tuple[float, float]:
+    """Estimate normalized stroke thickness and foreground ink density inside `bbox`."""
+    img_h, img_w = gray.shape[:2]
+    if img_h <= 0 or img_w <= 0:
+        return 0.0, 0.0
+
+    x0 = max(0, min(img_w - 1, int(np.floor(bbox.x * img_w))))
+    y0 = max(0, min(img_h - 1, int(np.floor(bbox.y * img_h))))
+    x1 = max(x0 + 1, min(img_w, int(np.ceil((bbox.x + bbox.width) * img_w))))
+    y1 = max(y0 + 1, min(img_h, int(np.ceil((bbox.y + bbox.height) * img_h))))
+
+    patch = gray[y0:y1, x0:x1]
+    ph, pw = patch.shape[:2]
+    if ph < 4 or pw < 4:
+        return 0.0, 0.0
+    if int(patch.max()) - int(patch.min()) < 15:
+        return 0.0, 0.0
+
+    _, binary_dark = cv2.threshold(patch, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Invert foreground when text sits on a dark banner (white/light text on dark background).
+    border_pixels = np.concatenate(
+        [binary_dark[0, :], binary_dark[-1, :], binary_dark[:, 0], binary_dark[:, -1]]
+    )
+    dark_border_ratio = (
+        float(np.count_nonzero(border_pixels)) / float(border_pixels.size)
+        if border_pixels.size > 0
+        else 0.0
+    )
+    if dark_border_ratio > 0.55:
+        fg = cv2.bitwise_not(binary_dark)
+    else:
+        fg = binary_dark
+
+    fg_count = int(np.count_nonzero(fg))
+    ink_ratio = float(fg_count) / float(fg.size)
+    if ink_ratio < 0.02 or ink_ratio > 0.78:
+        return 0.0, ink_ratio
+
+    dist = cv2.distanceTransform(fg, cv2.DIST_L2, 3)
+    fg_dists = dist[fg > 0]
+    if fg_dists.size == 0:
+        return 0.0, ink_ratio
+
+    stroke_px = 2.0 * float(np.percentile(fg_dists, 75))
+    max_sane_px = max(1.0, min(float(max(ph, pw)) * 0.5, float(min(ph, pw)) * 0.65))
+    stroke_px = min(stroke_px, max_sane_px)
+    return stroke_px / float(img_h), ink_ratio
+
+
+def _enrich_blocks_with_visual_metrics(
+    blocks: Sequence[OcrTextBlock],
+    bgr_or_gray: np.ndarray | None,
+) -> tuple[OcrTextBlock, ...]:
+    """Attach stroke width and ink ratio metrics computed from the source image."""
+    if not blocks or bgr_or_gray is None:
+        return tuple(blocks)
+
+    if any(b.stroke_width_norm > 0.0 for b in blocks):
+        return tuple(blocks)
+
+    if bgr_or_gray.ndim == 2:
+        gray = bgr_or_gray
+    else:
+        work = _downsample_for_ocr(bgr_or_gray, 1600)
+        gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+
+    enriched: list[OcrTextBlock] = []
+    for block in blocks:
+        stroke_norm, ink_ratio = _measure_block_visual_metrics(gray, block.bbox)
+        enriched.append(
+            replace(
+                block,
+                stroke_width_norm=stroke_norm,
+                ink_ratio=ink_ratio,
+            )
+        )
+    return tuple(enriched)
+
+
 def _build_ocr_result(
     raw_blocks: Sequence[OcrTextBlock],
     *,
@@ -140,6 +224,7 @@ def _build_ocr_result(
     image_height: int,
     min_confidence: float,
     applied: bool = True,
+    source_image: np.ndarray | None = None,
 ) -> OcrResult:
     filtered = [
         b
@@ -147,9 +232,10 @@ def _build_ocr_result(
         if b.text.strip() and float(b.confidence) >= float(min_confidence)
     ]
     ordered = _sort_blocks_reading_order(filtered)
-    full_text = "\n".join(b.text.strip() for b in ordered)
+    enriched = _enrich_blocks_with_visual_metrics(ordered, source_image)
+    full_text = "\n".join(b.text.strip() for b in enriched)
     return OcrResult(
-        blocks=ordered,
+        blocks=enriched,
         full_text=full_text,
         backend_name=backend_name,
         image_width=int(image_width),
@@ -396,6 +482,7 @@ class MacOSVisionOcrBackend:
             image_width=orig_w,
             image_height=orig_h,
             min_confidence=config.min_confidence,
+            source_image=work,
         )
 
 
@@ -480,6 +567,7 @@ class RapidOcrBackend:
             image_width=orig_w,
             image_height=orig_h,
             min_confidence=config.min_confidence,
+            source_image=work,
         )
 
 
@@ -547,7 +635,13 @@ class JapaneseOcrEngine:
             if not backend.is_available():
                 continue
             try:
-                return backend.recognize(bgr, self.config)
+                res = backend.recognize(bgr, self.config)
+                if res.blocks and not any(b.stroke_width_norm > 0.0 for b in res.blocks):
+                    return replace(
+                        res,
+                        blocks=_enrich_blocks_with_visual_metrics(res.blocks, bgr),
+                    )
+                return res
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning("OCR backend '%s' failed: %s", backend.name, exc)
