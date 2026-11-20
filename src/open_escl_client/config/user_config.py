@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 APP_DIR_NAME = "open-escl-client"
@@ -104,6 +104,7 @@ class UserConfig:
     bleed_through_enabled: bool = True
     bleed_through_strength: float = 0.6
     bleed_through_whiten_background: bool = True
+    expanded_sidebar_sections: dict[str, bool] = field(default_factory=dict)
 
     def resolved_save_directory(self) -> Path:
         """Return `save_directory` with `~` expanded into an OS-native `Path`."""
@@ -161,6 +162,12 @@ class UserConfig:
         bleed_through_whiten_background = bool(
             data.get("bleed_through_whiten_background", True)
         )
+        raw_sections = data.get("expanded_sidebar_sections")
+        expanded_sidebar_sections = (
+            {str(k): bool(v) for k, v in raw_sections.items()}
+            if isinstance(raw_sections, dict)
+            else {}
+        )
 
         return cls(
             save_directory=save_dir,
@@ -184,6 +191,7 @@ class UserConfig:
             bleed_through_enabled=bleed_through_enabled,
             bleed_through_strength=bleed_through_strength,
             bleed_through_whiten_background=bleed_through_whiten_background,
+            expanded_sidebar_sections=expanded_sidebar_sections,
         )
 
 

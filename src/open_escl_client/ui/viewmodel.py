@@ -166,6 +166,7 @@ class AppViewModel(QObject):
     cropSettingsChanged = Signal()
     cropBoxesChanged = Signal()
     cropOverlayChanged = Signal()
+    sidebarSectionsChanged = Signal()
 
     # Internal thread-safe completion signals for background scan tasks
     _previewFinishedInternal = Signal(object)
@@ -313,6 +314,9 @@ class AppViewModel(QObject):
         self._bleed_through_enabled: bool = loaded_cfg.bleed_through_enabled
         self._bleed_through_strength: float = loaded_cfg.bleed_through_strength
         self._bleed_through_whiten_background: bool = loaded_cfg.bleed_through_whiten_background
+        self._expanded_sidebar_sections: dict[str, bool] = dict(
+            loaded_cfg.expanded_sidebar_sections
+        )
 
         self._continuous_session: ContinuousScanSession | None = None
         self._saved_file_count: int = 0
@@ -369,6 +373,7 @@ class AppViewModel(QObject):
             bleed_through_enabled=self._bleed_through_enabled,
             bleed_through_strength=self._bleed_through_strength,
             bleed_through_whiten_background=self._bleed_through_whiten_background,
+            expanded_sidebar_sections=dict(self._expanded_sidebar_sections),
         )
         try:
             self._config_store.save(cfg)
@@ -554,6 +559,23 @@ class AppViewModel(QObject):
     @Property(str, notify=nextFilenamePreviewChanged)
     def nextFilenamePreview(self) -> str:
         return self._next_filename_preview
+
+    @Slot(str, result=bool)
+    def isSidebarSectionExpanded(self, section_id: str) -> bool:
+        """Return whether collapsible sidebar section `section_id` is expanded."""
+        return bool(self._expanded_sidebar_sections.get(str(section_id), False))
+
+    @Slot(str, bool)
+    def setSidebarSectionExpanded(self, section_id: str, expanded: bool) -> None:
+        """Persist expanded/collapsed state of collapsible sidebar section `section_id`."""
+        key = str(section_id).strip()
+        if not key:
+            return
+        flag = bool(expanded)
+        if self._expanded_sidebar_sections.get(key) != flag:
+            self._expanded_sidebar_sections[key] = flag
+            self.sidebarSectionsChanged.emit()
+            self._persist_config()
 
     @Property(int, notify=scanSaveChanged)
     def savedFileCount(self) -> int:
@@ -1590,6 +1612,7 @@ class AppViewModel(QObject):
         self._bleed_through_enabled = defaults.bleed_through_enabled
         self._bleed_through_strength = defaults.bleed_through_strength
         self._bleed_through_whiten_background = defaults.bleed_through_whiten_background
+        self._expanded_sidebar_sections = dict(defaults.expanded_sidebar_sections)
 
         if self._input_sources:
             self._selected_input_source = self._input_sources[0]
@@ -1608,6 +1631,7 @@ class AppViewModel(QObject):
         self.jpegQualityChanged.emit()
         self.multipagePdfChanged.emit()
         self.cropSettingsChanged.emit()
+        self.sidebarSectionsChanged.emit()
         self._refresh_next_filename_preview()
 
         if self._preview_bgr is not None:

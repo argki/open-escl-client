@@ -8,13 +8,33 @@ import QtQuick.Layouts
 Rectangle {
     id: sectionRoot
 
+    property string sectionId: objectName
     property string title: ""
     property string summaryText: ""
     property bool expanded: false
     default property alias contentData: contentColumn.data
 
     function toggle() {
-        expanded = !expanded
+        var nextVal = !expanded
+        expanded = nextVal
+        if (viewModel && sectionId.length > 0) {
+            viewModel.setSidebarSectionExpanded(sectionId, nextVal)
+        }
+    }
+
+    Component.onCompleted: {
+        if (viewModel && sectionId.length > 0) {
+            expanded = viewModel.isSidebarSectionExpanded(sectionId)
+        }
+    }
+
+    Connections {
+        target: viewModel
+        function onSidebarSectionsChanged() {
+            if (sectionRoot.sectionId.length > 0) {
+                sectionRoot.expanded = viewModel.isSidebarSectionExpanded(sectionRoot.sectionId)
+            }
+        }
     }
 
     Layout.fillWidth: true
