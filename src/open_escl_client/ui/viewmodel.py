@@ -25,7 +25,13 @@ from open_escl_client.core.continuous_scan import (
     ScanSaveProfile,
 )
 from open_escl_client.core.exporter import ImageExporter
-from open_escl_client.core.naming import FileNamingEngine
+from open_escl_client.core.naming import (
+    DEFAULT_NAMING_TEMPLATE,
+    FileNamingEngine,
+    sanitize_filename_stem,
+    template_has_ocr_tokens,
+)
+from open_escl_client.core.ocr_naming import OcrNamingExtractor, OcrNamingMetadata
 from open_escl_client.core.paper_size import PaperSizeOption, PaperSizeResolver
 from open_escl_client.core.preview_service import (
     PreviewScanService,
@@ -59,6 +65,7 @@ from open_escl_client.imaging.multi_crop import (
     normalize_detection_preset,
     oriented_aspect_ratio_for_preset,
 )
+from open_escl_client.imaging.ocr import JapaneseOcrEngine
 from open_escl_client.imaging.orientation import (
     AutoOrientationCorrector,
     rotate_image_cw,
@@ -168,12 +175,14 @@ class AppViewModel(QObject):
     cropBoxesChanged = Signal()
     cropOverlayChanged = Signal()
     sidebarSectionsChanged = Signal()
+    ocrNamingChanged = Signal()
 
     # Internal thread-safe completion signals for background scan tasks
     _previewFinishedInternal = Signal(object)
     _previewFailedInternal = Signal(str)
     _scanSaveFinishedInternal = Signal(object)
     _scanSaveFailedInternal = Signal(str)
+    _ocrFinishedInternal = Signal(object)
 
     def __init__(
         self,
@@ -189,6 +198,8 @@ class AppViewModel(QObject):
         config_store: UserConfigStore | None = None,
         deskew_processor: DeskewCropProcessor | None = None,
         orientation_corrector: AutoOrientationCorrector | None = None,
+        ocr_engine: JapaneseOcrEngine | None = None,
+        ocr_extractor: OcrNamingExtractor | None = None,
         run_preview_async: bool = False,
     ) -> None:
         super().__init__(parent)
@@ -204,6 +215,8 @@ class AppViewModel(QObject):
         self._config_store = config_store
         self._deskew_processor = deskew_processor or DeskewCropProcessor()
         self._orientation_corrector = orientation_corrector or AutoOrientationCorrector()
+        self._ocr_engine = ocr_engine or JapaneseOcrEngine()
+        self._ocr_extractor = ocr_extractor or OcrNamingExtractor()
         self._run_preview_async = run_preview_async
         self._image_provider = PreviewImageProvider()
 
@@ -211,6 +224,7 @@ class AppViewModel(QObject):
         self._previewFailedInternal.connect(self._on_preview_failed)
         self._scanSaveFinishedInternal.connect(self._on_scan_save_finished)
         self._scanSaveFailedInternal.connect(self._on_scan_save_failed)
+        self._ocrFinishedInternal.connect(self._on_ocr_finished)
         self.cropBoxesChanged.connect(self.cropOverlayChanged)
 
         loaded_cfg = self._config_store.load() if self._config_store is not None else UserConfig()
@@ -315,6 +329,13 @@ class AppViewModel(QObject):
         self._bleed_through_enabled: bool = loaded_cfg.bleed_through_enabled
         self._bleed_through_strength: float = loaded_cfg.bleed_through_strength
         self._bleed_through_whiten_background: bool = loaded_cfg.bleed_through_whiten_background
+        self._ocr_naming_enabled: bool = loaded_cfg.ocr_naming_enabled
+        self._ocr_title: str = ""
+        self._ocr_date: str = ""
+        self._ocr_summary: str = ""
+        self._ocr_backend_name: str = ""
+        self._ocr_busy: bool = False
+        self._ocr_ready_for_save: bool = False
         self._expanded_sidebar_sections: dict[str, bool] = dict(
             loaded_cfg.expanded_sidebar_sections
         )
@@ -374,6 +395,7 @@ class AppViewModel(QObject):
             bleed_through_enabled=self._bleed_through_enabled,
             bleed_through_strength=self._bleed_through_strength,
             bleed_through_whiten_background=self._bleed_through_whiten_background,
+            ocr_naming_enabled=self._ocr_naming_enabled,
             expanded_sidebar_sections=dict(self._expanded_sidebar_sections),
         )
         try:
@@ -381,20 +403,30 @@ class AppViewModel(QObject):
         except OSError:
             pass
 
+    def _current_ocr_tokens(self) -> dict[str, str]:
+        return {
+            "ocr_title": self._ocr_title,
+            "ocr_date": self._ocr_date,
+            "ocr_summary": self._ocr_summary,
+        }
+
     def _refresh_next_filename_preview(self) -> None:
         start_seq = self._continuous_session.next_seq if self._continuous_session is not None else 1
+        extra_tokens = self._current_ocr_tokens()
         try:
             preview = self._naming_engine.preview_next_filename(
                 Path(self._save_directory).expanduser(),
                 self._naming_rule,
                 file_format=self._selected_save_format,
                 start_seq=start_seq,
+                extra_tokens=extra_tokens,
             )
         except Exception:
             preview = self._naming_engine.render_filename(
                 self._naming_rule,
                 seq=start_seq,
                 file_format=self._selected_save_format,
+                extra_tokens=extra_tokens,
             )
         if self._next_filename_preview != preview:
             self._next_filename_preview = preview
@@ -570,6 +602,129 @@ class AppViewModel(QObject):
     @Property(str, notify=nextFilenamePreviewChanged)
     def nextFilenamePreview(self) -> str:
         return self._next_filename_preview
+
+    @Property(bool, notify=ocrNamingChanged)
+    def ocrNamingEnabled(self) -> bool:
+        return self._ocr_naming_enabled
+
+    @ocrNamingEnabled.setter
+    def ocrNamingEnabled(self, value: bool) -> None:
+        flag = bool(value)
+        if self._ocr_naming_enabled != flag:
+            self._ocr_naming_enabled = flag
+            self.ocrNamingChanged.emit()
+            self._persist_config()
+            if flag and self._preview_bgr is not None and not self._ocr_busy:
+                self.extractOcrNamingFromPreview()
+
+    @Property(str, notify=ocrNamingChanged)
+    def ocrTitle(self) -> str:
+        return self._ocr_title
+
+    @ocrTitle.setter
+    def ocrTitle(self, value: str) -> None:
+        cleaned = sanitize_filename_stem(value) if value.strip() else ""
+        if self._ocr_title != cleaned:
+            self._ocr_title = cleaned
+            self._ocr_ready_for_save = bool(self._ocr_title or self._ocr_date)
+            self.ocrNamingChanged.emit()
+            self._refresh_next_filename_preview()
+
+    @Property(str, notify=ocrNamingChanged)
+    def ocrDate(self) -> str:
+        return self._ocr_date
+
+    @ocrDate.setter
+    def ocrDate(self, value: str) -> None:
+        cleaned = sanitize_filename_stem(value) if value.strip() else ""
+        if self._ocr_date != cleaned:
+            self._ocr_date = cleaned
+            self._ocr_ready_for_save = bool(self._ocr_title or self._ocr_date)
+            self.ocrNamingChanged.emit()
+            self._refresh_next_filename_preview()
+
+    @Property(str, notify=ocrNamingChanged)
+    def ocrSummary(self) -> str:
+        return self._ocr_summary
+
+    @Property(bool, notify=ocrNamingChanged)
+    def ocrBusy(self) -> bool:
+        return self._ocr_busy
+
+    @Property(str, notify=ocrNamingChanged)
+    def ocrBackendName(self) -> str:
+        return self._ocr_backend_name
+
+    @Slot(str)
+    def insertNamingToken(self, token: str) -> None:
+        """Append or apply a placeholder token such as `{ocr_title}` into `namingRule`."""
+        cleaned = token.strip()
+        if not cleaned or cleaned in self._naming_rule:
+            return
+        cur = self._naming_rule.strip() or DEFAULT_NAMING_TEMPLATE
+        self.namingRule = f"{cur}_{cleaned}"
+
+    @Slot()
+    def applyOcrNamingPreset(self) -> None:
+        """Apply a concise OCR-driven naming template (`{ocr_date}_{ocr_title}_{seq:03d}`)."""
+        self.namingRule = "{ocr_date}_{ocr_title}_{seq:03d}"
+
+    def _current_ocr_target_image(self) -> np.ndarray | None:
+        if self._preview_bgr is None:
+            return None
+        if self._crop_boxes and 0 <= self._selected_crop_index < len(self._crop_boxes):
+            rendered = self._render_crop_bgr(self._selected_crop_index)
+            if rendered is not None:
+                return rendered
+        return self._maybe_apply_bleed_through(self._preview_bgr)
+
+    @Slot()
+    def extractOcrNamingFromPreview(self) -> None:
+        """Run Japanese OCR on the active preview/crop and update candidate naming fields."""
+        target = self._current_ocr_target_image()
+        if target is None or self._ocr_busy:
+            return
+        self._ocr_busy = True
+        self.ocrNamingChanged.emit()
+        img_copy = target.copy()
+
+        def _worker() -> None:
+            try:
+                ocr_res = self._ocr_engine.recognize(img_copy)
+                meta = self._ocr_extractor.extract(ocr_res)
+                self._ocrFinishedInternal.emit((meta, ocr_res.backend_name, ""))
+            except Exception as exc:
+                self._ocrFinishedInternal.emit((OcrNamingMetadata(), "", str(exc)))
+
+        if self._run_preview_async:
+            thread = threading.Thread(target=_worker, daemon=True)
+            thread.start()
+        else:
+            _worker()
+
+    def _on_ocr_finished(self, payload: object) -> None:
+        self._ocr_busy = False
+        if not isinstance(payload, tuple) or len(payload) != 3:
+            self.ocrNamingChanged.emit()
+            return
+        meta, backend_name, error_msg = payload
+        if isinstance(meta, OcrNamingMetadata):
+            self._ocr_title = meta.ocr_title
+            self._ocr_date = meta.ocr_date
+            self._ocr_summary = meta.ocr_summary
+            self._ocr_backend_name = str(backend_name or "")
+            self._ocr_ready_for_save = bool(meta.ocr_title or meta.ocr_date)
+        self.ocrNamingChanged.emit()
+        self._refresh_next_filename_preview()
+        if error_msg:
+            self.set_status_message(f"OCR 抽出エラー: {error_msg}")
+        elif self._ocr_title or self._ocr_date:
+            self.set_status_message(
+                f"OCR 候補抽出完了: タイトル「{self._ocr_title or 'なし'}」"
+                f" / 日付「{self._ocr_date or 'なし'}」"
+            )
+        else:
+            self.set_status_message("OCR からタイトル・日付候補を検出できませんでした")
 
     @Slot(str, result=bool)
     def isSidebarSectionExpanded(self, section_id: str) -> bool:
@@ -1623,6 +1778,12 @@ class AppViewModel(QObject):
         self._bleed_through_enabled = defaults.bleed_through_enabled
         self._bleed_through_strength = defaults.bleed_through_strength
         self._bleed_through_whiten_background = defaults.bleed_through_whiten_background
+        self._ocr_naming_enabled = defaults.ocr_naming_enabled
+        self._ocr_title = ""
+        self._ocr_date = ""
+        self._ocr_summary = ""
+        self._ocr_backend_name = ""
+        self._ocr_ready_for_save = False
         self._expanded_sidebar_sections = dict(defaults.expanded_sidebar_sections)
 
         if self._input_sources:
@@ -1643,6 +1804,7 @@ class AppViewModel(QObject):
         self.multipagePdfChanged.emit()
         self.cropSettingsChanged.emit()
         self.sidebarSectionsChanged.emit()
+        self.ocrNamingChanged.emit()
         self._refresh_next_filename_preview()
 
         if self._preview_bgr is not None:
@@ -1775,6 +1937,8 @@ class AppViewModel(QObject):
                 f"プレビュー完了 ({session_obj.preview_dpi} dpi / "
                 f"{session_obj.image_width_px}×{session_obj.image_height_px} px{crop_note})"
             )
+            if self._ocr_naming_enabled:
+                self.extractOcrNamingFromPreview()
         except Exception as exc:
             self.set_status_message(f"プレビュー画像の読み込みに失敗しました: {exc}")
 
@@ -1852,10 +2016,12 @@ class AppViewModel(QObject):
 
         post_processor = None
         self._last_scan_pipeline = None
+        needs_ocr_pipeline = self._ocr_naming_enabled or template_has_ocr_tokens(self._naming_rule)
         if (
             self._auto_crop_enabled
             or self._auto_orientation_enabled
             or self._bleed_through_enabled
+            or needs_ocr_pipeline
         ):
             pipeline = MultiCropScanPipeline(
                 MultiCropPipelineConfig(
@@ -1868,10 +2034,13 @@ class AppViewModel(QObject):
                     margin_mm=self._crop_margin_mm,
                     target_dpi=float(self._selected_resolution),
                     bleed_through=self._current_bleed_through_config(),
+                    ocr_naming_enabled=needs_ocr_pipeline,
                 ),
                 deskew_processor=self._deskew_processor,
                 orientation_corrector=self._orientation_corrector,
                 bleed_through_remover=self._bleed_through_remover,
+                ocr_engine=self._ocr_engine,
+                ocr_extractor=self._ocr_extractor,
             )
             self._last_scan_pipeline = pipeline
             same_paper_as_preview = (
@@ -1893,6 +2062,27 @@ class AppViewModel(QObject):
                 consume_preview_boxes_once=True,
             )
 
+        ocr_token_provider = None
+        if needs_ocr_pipeline:
+            use_preview_ocr = self._ocr_ready_for_save and (
+                bool(self._ocr_title) or bool(self._ocr_date)
+            )
+            preview_tokens = self._current_ocr_tokens()
+
+            def _resolve_ocr_tokens(page_bytes: bytes, idx: int) -> dict[str, str]:
+                nonlocal use_preview_ocr
+                if use_preview_ocr and idx == 0:
+                    use_preview_ocr = False
+                    return dict(preview_tokens)
+                if self._last_scan_pipeline is not None:
+                    docs = self._last_scan_pipeline.last_processed_documents
+                    if 0 <= idx < len(docs) and docs[idx].ocr_metadata is not None:
+                        return docs[idx].ocr_metadata.to_tokens()
+                ocr_res = self._ocr_engine.recognize(page_bytes)
+                return self._ocr_extractor.extract(ocr_res).to_tokens()
+
+            ocr_token_provider = _resolve_ocr_tokens
+
         return ScanSaveProfile(
             base_url=scanner.base_url,
             source_caps=active_caps,
@@ -1904,6 +2094,7 @@ class AppViewModel(QObject):
             quality=self._jpeg_quality,
             multipage_pdf=self._multipage_pdf,
             post_processor=post_processor,
+            ocr_token_provider=ocr_token_provider,
         )
 
     def _on_scan_save_finished(self, result_obj: object) -> None:

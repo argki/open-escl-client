@@ -16,6 +16,7 @@ from open_escl_client.escl.capabilities import InputSourceCaps
 from open_escl_client.escl.scan_client import EsclScanClient, EsclScanRequest
 
 PostProcessor = Callable[[bytes], list[bytes]]
+OcrTokenProvider = Callable[[bytes, int], dict[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,7 @@ class ScanSaveProfile:
     color_mode: str = "RGB24"
     multipage_pdf: bool = False
     post_processor: PostProcessor | None = None
+    ocr_token_provider: OcrTokenProvider | None = None
 
     @property
     def is_multipage_pdf_mode(self) -> bool:
@@ -69,6 +71,7 @@ class ContinuousScanSession:
         self._next_seq: int = max(1, int(initial_seq))
         self._saved_results: list[ExportResult] = []
         self._pending_pages: list[bytes] = []
+        self._pending_extra_tokens: dict[str, str] | None = None
 
     @classmethod
     def from_preview_session(
@@ -133,14 +136,16 @@ class ContinuousScanSession:
         self._profile = profile
 
     def clear_pending_pages(self) -> None:
-        """Discard any buffered pages waiting for multi-page PDF finalization."""
+        """Discard any buffered pages waiting for multi-page PDF/TIFF finalization."""
         self._pending_pages.clear()
+        self._pending_extra_tokens = None
 
     def reset_counters(self, initial_seq: int = 1) -> None:
         """Reset sequence counter, saved history, and pending buffer."""
         self._next_seq = max(1, int(initial_seq))
         self._saved_results.clear()
         self._pending_pages.clear()
+        self._pending_extra_tokens = None
 
     def build_main_scan_request(self) -> EsclScanRequest:
         """Build the high-DPI eSCL scan request from the active `ScanSaveProfile`."""
@@ -186,6 +191,8 @@ class ContinuousScanSession:
             pages = [scan_result.image_bytes]
 
         if self._profile.is_multipage_pdf_mode:
+            if not self._pending_pages and self._profile.ocr_token_provider is not None:
+                self._pending_extra_tokens = self._profile.ocr_token_provider(pages[0], 0)
             self._pending_pages.extend(pages)
             return ContinuousScanStepResult(
                 saved_results=(),
@@ -201,13 +208,19 @@ class ContinuousScanSession:
             quality=self._profile.quality,
         )
         step_saved: list[ExportResult] = []
-        for page_bytes in pages:
+        for idx, page_bytes in enumerate(pages):
+            extra_tokens = (
+                self._profile.ocr_token_provider(page_bytes, idx)
+                if self._profile.ocr_token_provider is not None
+                else None
+            )
             out_path, used_seq = self._naming_engine.resolve_next_path(
                 self._profile.save_dir,
                 self._profile.naming_template,
                 file_format=self._profile.file_format,
                 start_seq=self._next_seq,
                 now=now,
+                extra_tokens=extra_tokens,
             )
             exported = self._exporter.export_single(page_bytes, out_path, options=export_opts)
             self._saved_results.append(exported)
@@ -235,6 +248,7 @@ class ContinuousScanSession:
             file_format=target_fmt,
             start_seq=self._next_seq,
             now=now,
+            extra_tokens=self._pending_extra_tokens,
         )
         export_opts = ExportOptions(
             file_format=target_fmt,
@@ -243,6 +257,7 @@ class ContinuousScanSession:
         )
         exported = self._exporter.export_pages(self._pending_pages, out_path, options=export_opts)
         self._pending_pages.clear()
+        self._pending_extra_tokens = None
         self._saved_results.append(exported)
         self._next_seq = used_seq + 1
         return exported
