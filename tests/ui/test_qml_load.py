@@ -995,6 +995,21 @@ def test_viewmodel_persists_all_settings_and_resets_to_defaults(tmp_path: Path) 
     assert vm2.bleedThroughWhitenBackground is True
     assert "A4" in vm2.selectedPaperSize
 
+    # Verify QML previewDpiCombo, resetAllSettingsButton, and resetSettingsConfirmDialog load.
+    engine, _ = create_qml_engine(vm2)
+    root = engine.rootObjects()[0]
+    preview_dpi_combo = root.findChild(QObject, "previewDpiCombo")
+    reset_btn = root.findChild(QObject, "resetAllSettingsButton")
+    reset_dialog = root.findChild(QObject, "resetSettingsConfirmDialog")
+    assert preview_dpi_combo is not None and reset_btn is not None and reset_dialog is not None
+    assert preview_dpi_combo.property("currentText") == "100"
+    vm2.namingRule = "TempChanged_{seq:02d}"
+    reset_dialog.accept()
+    assert vm2.namingRule == "Scan_{date}_{time}_{seq:03d}"
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
 
 
 

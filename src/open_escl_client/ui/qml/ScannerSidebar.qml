@@ -186,6 +186,29 @@ Rectangle {
                     }
 
                     Label {
+                        text: "高速プレビュー時の解像度 (DPI)"
+                        font.bold: true
+                        color: "#374151"
+                    }
+
+                    ComboBox {
+                        id: previewDpiCombo
+                        objectName: "previewDpiCombo"
+                        Layout.fillWidth: true
+                        model: viewModel ? viewModel.previewDpiChoices : []
+                        currentIndex: {
+                            if (!viewModel || !model) return 0
+                            var idx = model.indexOf(viewModel.selectedPreviewDpi)
+                            return idx >= 0 ? idx : 0
+                        }
+                        onActivated: function(index) {
+                            if (viewModel && model[index] !== undefined) {
+                                viewModel.selectedPreviewDpi = model[index]
+                            }
+                        }
+                    }
+
+                    Label {
                         text: "保存時の解像度 (DPI)"
                         font.bold: true
                         color: "#374151"
@@ -240,7 +263,43 @@ Rectangle {
                 Layout.rightMargin: 16
             }
 
+            // ----------------------------------------------------------------
+            // 全設定の初期化リセットボタン
+            // ----------------------------------------------------------------
+            Button {
+                id: resetAllSettingsButton
+                objectName: "resetAllSettingsButton"
+                text: "設定を初期状態にリセット"
+                Layout.fillWidth: true
+                Layout.maximumWidth: parent.width - 32
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                onClicked: resetSettingsConfirmDialog.open()
+            }
+
+            Item { Layout.preferredHeight: 8 }
             Item { Layout.fillHeight: true }
+        }
+    }
+
+    Dialog {
+        id: resetSettingsConfirmDialog
+        objectName: "resetSettingsConfirmDialog"
+        title: "設定のリセット確認"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        standardButtons: Dialog.Yes | Dialog.No
+
+        Label {
+            text: "保存先・ネーミングルール・解像度・トリミング・画質設定をすべて初期状態に戻しますか？"
+            wrapMode: Text.WordWrap
+            width: 300
+        }
+
+        onAccepted: {
+            if (viewModel) {
+                viewModel.resetAllSettingsToDefaults()
+            }
         }
     }
 

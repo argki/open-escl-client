@@ -94,7 +94,7 @@ Rectangle {
             id: previewButton
             objectName: "previewButton"
             text: viewModel
-                  ? ("高速プレビュー (" + viewModel.previewDpi + " dpi)")
+                  ? ("高速プレビュー (" + viewModel.selectedPreviewDpi + " dpi)")
                   : "高速プレビュー (低解像度)"
             enabled: viewModel ? !viewModel.isBusy : true
             Layout.preferredHeight: 40

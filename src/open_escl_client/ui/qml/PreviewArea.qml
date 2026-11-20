@@ -106,7 +106,7 @@ Rectangle {
 
                 Label {
                     Layout.alignment: Qt.AlignHCenter
-                    text: "下部の「高速プレビュー」を押すと、低解像度（" + (viewModel ? viewModel.previewDpi : 100) + " dpi）で素早く読み取り結果を確認できます"
+                    text: "下部の「高速プレビュー」を押すと、低解像度（" + (viewModel ? viewModel.selectedPreviewDpi : 100) + " dpi）で素早く読み取り結果を確認できます"
                     font.pixelSize: 13
                     color: "#9CA3AF"
                 }
