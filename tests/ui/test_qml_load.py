@@ -789,3 +789,62 @@ def test_viewmodel_per_crop_sensitivity_redetects_only_selected_box(tmp_path: Pa
     assert vm.selectedCropSensitivity == 0
 
 
+def test_viewmodel_bleed_through_preview_updates_immediately_without_rescan(
+    tmp_path: Path,
+) -> None:
+    """Toggling bleed-through settings updates preview & thumbnails without rescanning."""
+    import numpy as np
+
+    w, h = 600, 800
+    arr = np.full((h, w, 3), (244, 246, 248), dtype=np.uint8)
+    # Faint reverse bleed-through bar and crisp foreground bar
+    import cv2
+
+    cv2.rectangle(arr, (80, 120), (520, 155), (200, 202, 204), -1)
+    cv2.rectangle(arr, (80, 340), (520, 375), (30, 30, 30), -1)
+
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/png",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        config_store=UserConfigStore(tmp_path / "config.json"),
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+    assert mock_client.scan_single_page.call_count == 1
+    initial_url = vm.previewImageUrl
+
+    # Enable bleed-through removal -> preview image URL updates immediately without new scan.
+    vm.bleedThroughEnabled = True
+    assert vm.bleedThroughEnabled is True
+    assert vm.previewImageUrl != initial_url
+    assert mock_client.scan_single_page.call_count == 1
+
+    # Adjust strength & whiten background -> updates again without rescanning.
+    url_after_enable = vm.previewImageUrl
+    vm.bleedThroughStrength = 0.9
+    assert vm.bleedThroughStrength == 0.9
+    assert vm.previewImageUrl != url_after_enable
+
+    url_after_strength = vm.previewImageUrl
+    vm.bleedThroughWhitenBackground = True
+    assert vm.bleedThroughWhitenBackground is True
+    assert vm.previewImageUrl != url_after_strength
+    assert mock_client.scan_single_page.call_count == 1
+
+
+

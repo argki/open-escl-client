@@ -407,3 +407,41 @@ def test_landscape_a4_preview_auto_90_rotation_persists_into_saved_jpeg_and_pdf(
     out2 = step2.saved_results[0].output_path
     with Image.open(out2) as saved2:
         assert saved2.height > saved2.width
+
+
+def test_pipeline_applies_bleed_through_removal_to_saved_documents() -> None:
+    """`MultiCropScanPipeline` applies `BleedThroughConfig` to cropped & full-page outputs."""
+    from open_escl_client.imaging.bleed_through import BleedThroughConfig
+
+    img = np.full((500, 400, 3), (244, 246, 248), dtype=np.uint8)
+    # Faint reverse bleed bar
+    cv2.rectangle(img, (40, 80), (360, 110), (200, 202, 204), -1)
+    # Crisp foreground text bar
+    cv2.rectangle(img, (40, 220), (360, 250), (30, 30, 30), -1)
+
+    pipeline_off = MultiCropScanPipeline(
+        MultiCropPipelineConfig(
+            auto_crop_enabled=False,
+            auto_orientation_enabled=False,
+            bleed_through=BleedThroughConfig(enabled=False, strength=0.8),
+        )
+    )
+    docs_off = pipeline_off.process_documents(img)
+    assert len(docs_off) == 1
+    assert float(np.mean(docs_off[0].image[85:105, 60:340])) < 210.0
+
+    pipeline_on = MultiCropScanPipeline(
+        MultiCropPipelineConfig(
+            auto_crop_enabled=False,
+            auto_orientation_enabled=False,
+            bleed_through=BleedThroughConfig(
+                enabled=True, strength=0.85, whiten_background=False
+            ),
+        )
+    )
+    docs_on = pipeline_on.process_documents(img)
+    assert len(docs_on) == 1
+    # Bleed bar cleaned near paper base while foreground bar remains dark.
+    assert float(np.mean(docs_on[0].image[85:105, 60:340])) >= 232.0
+    assert float(np.mean(docs_on[0].image[225:245, 60:340])) < 45.0
+

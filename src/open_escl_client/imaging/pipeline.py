@@ -8,11 +8,15 @@ compatible with `ContinuousScanSession`.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
 
+from open_escl_client.imaging.bleed_through import (
+    BleedThroughConfig,
+    BleedThroughRemover,
+)
 from open_escl_client.imaging.multi_crop import (
     DeskewCropProcessor,
     DetectionConfig,
@@ -46,6 +50,7 @@ class MultiCropPipelineConfig:
     target_dpi: float = 300.0
     output_format: Literal["PNG", "JPEG"] = "PNG"
     output_quality: int = 95
+    bleed_through: BleedThroughConfig = field(default_factory=BleedThroughConfig)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +73,12 @@ class MultiCropScanPipeline:
         *,
         deskew_processor: DeskewCropProcessor | None = None,
         orientation_corrector: AutoOrientationCorrector | None = None,
+        bleed_through_remover: BleedThroughRemover | None = None,
     ) -> None:
         self.config = config or MultiCropPipelineConfig()
         self._deskew_processor = deskew_processor or DeskewCropProcessor()
         self._orientation_corrector = orientation_corrector or AutoOrientationCorrector()
+        self._bleed_through_remover = bleed_through_remover or BleedThroughRemover()
         self._last_processed_documents: tuple[ProcessedDocument, ...] = ()
 
     @property
@@ -139,26 +146,14 @@ class MultiCropScanPipeline:
                     rot = box.effective_rotation_cw_deg
                     rotated_img = rotate_image_cw(cropped.image, rot)
                     results.append(
-                        ProcessedDocument(
-                            image=rotated_img,
-                            box=cropped.box,
-                            rotation_cw_deg=rot,
-                            orientation_source="manual",
-                            encoded_bytes=self._encode(rotated_img),
-                        )
+                        self._finalize_document(rotated_img, cropped.box, rot, "manual")
                     )
                 elif self.config.auto_orientation_enabled:
                     if box.auto_rotation_cw_deg != 0:
                         rot = box.effective_rotation_cw_deg
                         rotated_img = rotate_image_cw(cropped.image, rot)
                         results.append(
-                            ProcessedDocument(
-                                image=rotated_img,
-                                box=cropped.box,
-                                rotation_cw_deg=rot,
-                                orientation_source="preview_auto",
-                                encoded_bytes=self._encode(rotated_img),
-                            )
+                            self._finalize_document(rotated_img, cropped.box, rot, "preview_auto")
                         )
                     else:
                         # Re-check at high DPI in case low-DPI preview could not read tiny text.
@@ -171,13 +166,7 @@ class MultiCropScanPipeline:
                         )
                 else:
                     results.append(
-                        ProcessedDocument(
-                            image=cropped.image,
-                            box=cropped.box,
-                            rotation_cw_deg=0,
-                            orientation_source="disabled",
-                            encoded_bytes=self._encode(cropped.image),
-                        )
+                        self._finalize_document(cropped.image, cropped.box, 0, "disabled")
                     )
             self._last_processed_documents = tuple(results)
             return results
@@ -261,31 +250,43 @@ class MultiCropScanPipeline:
     ) -> ProcessedDocument:
         if forced_rotation is not None:
             rotated = rotate_image_cw(bgr, forced_rotation)
-            return ProcessedDocument(
-                image=rotated,
-                box=box.with_manual_rotation(forced_rotation),
-                rotation_cw_deg=forced_rotation,
-                orientation_source="manual",
-                encoded_bytes=self._encode(rotated),
+            return self._finalize_document(
+                rotated,
+                box.with_manual_rotation(forced_rotation),
+                forced_rotation,
+                "manual",
             )
 
         if self.config.auto_orientation_enabled:
             orient_res = self._orientation_corrector.correct(bgr)
             updated_box = box.with_auto_rotation(orient_res.rotation_cw_deg)
-            return ProcessedDocument(
-                image=orient_res.image,
-                box=updated_box,
-                rotation_cw_deg=orient_res.rotation_cw_deg,
-                orientation_source=orient_res.estimate.backend_name,
-                encoded_bytes=self._encode(orient_res.image),
+            return self._finalize_document(
+                orient_res.image,
+                updated_box,
+                orient_res.rotation_cw_deg,
+                orient_res.estimate.backend_name,
             )
 
+        return self._finalize_document(bgr, box.with_auto_rotation(0), 0, "disabled")
+
+    def _finalize_document(
+        self,
+        bgr: np.ndarray,
+        box: RotatedCropBox,
+        rotation_cw_deg: RotationDeg,
+        orientation_source: str,
+    ) -> ProcessedDocument:
+        filtered = bgr
+        if self.config.bleed_through.enabled:
+            filtered = self._bleed_through_remover.apply(
+                filtered, self.config.bleed_through
+            ).image
         return ProcessedDocument(
-            image=bgr,
-            box=box.with_auto_rotation(0),
-            rotation_cw_deg=0,
-            orientation_source="disabled",
-            encoded_bytes=self._encode(bgr),
+            image=filtered,
+            box=box,
+            rotation_cw_deg=rotation_cw_deg,
+            orientation_source=orientation_source,
+            encoded_bytes=self._encode(filtered),
         )
 
     def _encode(self, bgr: np.ndarray) -> bytes:

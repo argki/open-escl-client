@@ -38,6 +38,10 @@ from open_escl_client.escl.capabilities import (
 )
 from open_escl_client.escl.discovery import DiscoveredScanner, EsclScannerDiscovery
 from open_escl_client.escl.scan_client import EsclScanClient
+from open_escl_client.imaging.bleed_through import (
+    BleedThroughConfig,
+    BleedThroughRemover,
+)
 from open_escl_client.imaging.multi_crop import (
     CropMarginOffsets,
     DeskewCropProcessor,
@@ -247,6 +251,11 @@ class AppViewModel(QObject):
         self._selected_crop_index: int = -1
         self._preview_boxes_ready_for_save: bool = False
         self._last_scan_pipeline: MultiCropScanPipeline | None = None
+
+        self._bleed_through_remover = BleedThroughRemover()
+        self._bleed_through_enabled: bool = False
+        self._bleed_through_strength: float = 0.6
+        self._bleed_through_whiten_background: bool = False
 
         self._continuous_session: ContinuousScanSession | None = None
         self._saved_file_count: int = 0
@@ -636,6 +645,44 @@ class AppViewModel(QObject):
             return
         self.detectionSensitivity = clamped
 
+    @Property(bool, notify=cropSettingsChanged)
+    def bleedThroughEnabled(self) -> bool:
+        return self._bleed_through_enabled
+
+    @bleedThroughEnabled.setter
+    def bleedThroughEnabled(self, value: bool) -> None:
+        enabled = bool(value)
+        if self._bleed_through_enabled != enabled:
+            self._bleed_through_enabled = enabled
+            self.cropSettingsChanged.emit()
+            self._refresh_bleed_through_preview()
+
+    @Property(float, notify=cropSettingsChanged)
+    def bleedThroughStrength(self) -> float:
+        return self._bleed_through_strength
+
+    @bleedThroughStrength.setter
+    def bleedThroughStrength(self, value: float) -> None:
+        clamped = round(max(0.0, min(1.0, float(value))), 2)
+        if abs(self._bleed_through_strength - clamped) > 1e-6:
+            self._bleed_through_strength = clamped
+            self.cropSettingsChanged.emit()
+            if self._bleed_through_enabled:
+                self._refresh_bleed_through_preview()
+
+    @Property(bool, notify=cropSettingsChanged)
+    def bleedThroughWhitenBackground(self) -> bool:
+        return self._bleed_through_whiten_background
+
+    @bleedThroughWhitenBackground.setter
+    def bleedThroughWhitenBackground(self, value: bool) -> None:
+        whiten = bool(value)
+        if self._bleed_through_whiten_background != whiten:
+            self._bleed_through_whiten_background = whiten
+            self.cropSettingsChanged.emit()
+            if self._bleed_through_enabled:
+                self._refresh_bleed_through_preview()
+
     @Property(float, notify=cropSettingsChanged)
     def cropMarginMm(self) -> float:
         return self._crop_margin_mm
@@ -735,6 +782,36 @@ class AppViewModel(QObject):
         self._image_provider.clear_crop_thumbnails()
         self.cropBoxesChanged.emit()
 
+    def _current_bleed_through_config(self) -> BleedThroughConfig:
+        return BleedThroughConfig(
+            enabled=self._bleed_through_enabled,
+            strength=self._bleed_through_strength,
+            whiten_background=self._bleed_through_whiten_background,
+        )
+
+    def _maybe_apply_bleed_through(self, bgr: np.ndarray) -> np.ndarray:
+        if not self._bleed_through_enabled:
+            return bgr
+        return self._bleed_through_remover.apply(
+            bgr, self._current_bleed_through_config()
+        ).image
+
+    def _refresh_bleed_through_preview(self) -> None:
+        if self._preview_bgr is None or self._preview_session is None:
+            return
+        if self._bleed_through_enabled:
+            filtered = self._maybe_apply_bleed_through(self._preview_bgr)
+            url = self._image_provider.update_image_bytes(
+                encode_image_bytes(filtered, fmt="JPEG", quality=92)
+            )
+        else:
+            url = self._image_provider.update_image_bytes(self._preview_session.image_bytes)
+        self._preview_image_url = url
+        self.previewChanged.emit()
+        if self._crop_boxes:
+            self._rebuild_all_crop_thumbnails()
+            self.cropBoxesChanged.emit()
+
     def _render_thumbnail_bytes(self, bgr: np.ndarray, max_side: int = 320) -> bytes:
         h, w = bgr.shape[:2]
         longest = max(h, w)
@@ -763,7 +840,7 @@ class AppViewModel(QObject):
             dpi=dpi,
         )
         rotated = rotate_image_cw(cropped.image, box.effective_rotation_cw_deg)
-        thumb_bytes = self._render_thumbnail_bytes(rotated)
+        thumb_bytes = self._render_thumbnail_bytes(self._maybe_apply_bleed_through(rotated))
         url = self._image_provider.set_crop_thumbnail(box.index, thumb_bytes)
         self._crop_thumbnail_urls[box.index] = url
 
@@ -817,7 +894,9 @@ class AppViewModel(QObject):
                 refined_box = refined_box.with_auto_rotation(0)
 
             analyzed.append(refined_box)
-            thumb_bytes = self._render_thumbnail_bytes(final_img)
+            thumb_bytes = self._render_thumbnail_bytes(
+                self._maybe_apply_bleed_through(final_img)
+            )
             url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
             self._crop_thumbnail_urls[refined_box.index] = url
 
@@ -899,7 +978,9 @@ class AppViewModel(QObject):
                 refined_box = refined_box.with_auto_rotation(0)
 
             self._crop_boxes[list_index] = refined_box
-            thumb_bytes = self._render_thumbnail_bytes(final_img)
+            thumb_bytes = self._render_thumbnail_bytes(
+                self._maybe_apply_bleed_through(final_img)
+            )
             url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
             self._crop_thumbnail_urls[refined_box.index] = url
 
@@ -1170,6 +1251,11 @@ class AppViewModel(QObject):
             url = self._image_provider.update_image_bytes(session_obj.image_bytes)
             self._preview_session = session_obj
             self._preview_bgr = decode_image_bytes(session_obj.image_bytes)
+            if self._bleed_through_enabled and self._preview_bgr is not None:
+                filtered = self._maybe_apply_bleed_through(self._preview_bgr)
+                url = self._image_provider.update_image_bytes(
+                    encode_image_bytes(filtered, fmt="JPEG", quality=92)
+                )
             self._preview_image_url = url
             self._preview_zoom = 1.0
             self.previewZoomChanged.emit()
@@ -1257,7 +1343,11 @@ class AppViewModel(QObject):
 
         post_processor = None
         self._last_scan_pipeline = None
-        if self._auto_crop_enabled or self._auto_orientation_enabled:
+        if (
+            self._auto_crop_enabled
+            or self._auto_orientation_enabled
+            or self._bleed_through_enabled
+        ):
             pipeline = MultiCropScanPipeline(
                 MultiCropPipelineConfig(
                     auto_crop_enabled=self._auto_crop_enabled,
@@ -1267,9 +1357,11 @@ class AppViewModel(QObject):
                     detection_sensitivity=self._detection_sensitivity,
                     margin_mm=self._crop_margin_mm,
                     target_dpi=float(self._selected_resolution),
+                    bleed_through=self._current_bleed_through_config(),
                 ),
                 deskew_processor=self._deskew_processor,
                 orientation_corrector=self._orientation_corrector,
+                bleed_through_remover=self._bleed_through_remover,
             )
             self._last_scan_pipeline = pipeline
             same_paper_as_preview = (

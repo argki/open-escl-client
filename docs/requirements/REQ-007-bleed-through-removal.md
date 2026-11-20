@@ -70,7 +70,7 @@ feat(imaging): 紙の地色推定とエッジ保護による両面印刷の裏�
 
 ### タスク 2: 画像処理パイプライン（`MultiCropScanPipeline` / プレビュー）への裏写り除去ステージの統合
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `MultiCropPipelineConfig` および `MultiCropScanPipeline`、`AppViewModel` のプレビュー画像処理へ `BleedThroughConfig`（有効/無効、除去強度 `strength: 0.0-1.0`、背景白化 `whiten_background`）を組み込み、切り出し後の原稿イメージに対してプレビュー即時反映および本スキャン・連続スキャン時の同一適用を行えるようにする（将来 `REQ-006` の `ColorAdjustmentPipeline` へもそのまま統合可能な設計とする）
 - **提案コミットメッセージ**:
