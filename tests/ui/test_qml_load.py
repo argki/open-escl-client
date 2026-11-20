@@ -1011,5 +1011,64 @@ def test_viewmodel_persists_all_settings_and_resets_to_defaults(tmp_path: Path) 
     engine.deleteLater()
 
 
+def test_preview_area_fits_within_window_and_provides_wheel_zoom_and_scrollbars() -> None:
+    """Preview header/footer never overflow right edge at initial/min width; wheel/scroll exist."""
+    import numpy as np
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:450] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+    assert vm.cropCount == 1
+
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+    preview_area = root.findChild(QObject, "previewArea")
+    zoom_row = root.findChild(QObject, "zoomControlsRow")
+    hint_label = root.findChild(QObject, "cropStripHintLabel")
+    wheel_handler = root.findChild(QObject, "previewWheelHandler")
+    v_scroll = root.findChild(QObject, "previewVerticalScrollBar")
+    h_scroll = root.findChild(QObject, "previewHorizontalScrollBar")
+
+    assert preview_area is not None and zoom_row is not None and hint_label is not None
+    assert wheel_handler is not None and v_scroll is not None and h_scroll is not None
+
+    for win_w in (1180, 920):
+        root.setProperty("width", win_w)
+        QCoreApplication.processEvents()
+        pa_w = float(preview_area.property("width"))
+        zoom_right = float(zoom_row.property("x")) + float(zoom_row.property("width")) + 20.0
+        hint_right = float(hint_label.property("x")) + float(hint_label.property("width")) + 28.0
+        assert pa_w > 0.0
+        assert zoom_right <= pa_w + 1.0
+        assert hint_right <= pa_w + 1.0
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+
 
 

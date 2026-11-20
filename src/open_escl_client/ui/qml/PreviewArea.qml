@@ -24,20 +24,27 @@ Rectangle {
         // 1. プレビューヘッダー（設定サマリー・プレビューDPI・ズーム操作ボタン）
         // --------------------------------------------------------------------
         RowLayout {
+            id: previewHeaderRow
             Layout.fillWidth: true
-            spacing: 10
+            spacing: 8
 
             Label {
                 text: "プレビューキャンバス（色合い・自動トリミング確認）"
-                font.pixelSize: 15
+                font.pixelSize: 14
                 font.bold: true
                 color: "#1F2937"
+                Layout.minimumWidth: 100
+                Layout.maximumWidth: implicitWidth
+                elide: Text.ElideRight
             }
 
-            Item { Layout.fillWidth: true }
-
             Label {
+                id: previewSummaryLabel
                 objectName: "previewSummaryLabel"
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                horizontalAlignment: Text.AlignRight
+                elide: Text.ElideRight
                 text: viewModel
                       ? (viewModel.selectedPaperSize
                          + " / プレビュー: " + viewModel.previewDpi + " dpi"
@@ -50,6 +57,9 @@ Rectangle {
 
             // ズーム操作コントロール
             RowLayout {
+                id: zoomControlsRow
+                objectName: "zoomControlsRow"
+                Layout.fillWidth: false
                 spacing: 4
                 visible: viewModel ? viewModel.hasPreview : false
 
@@ -115,7 +125,7 @@ Rectangle {
                 }
             }
 
-            // プレビュー画像表示領域（ズーム・スクロール・トリミング枠オーバーレイ対応）
+            // プレビュー画像表示領域（ズーム・ホイール・スクロールバー・トリミング枠オーバーレイ対応）
             Flickable {
                 id: previewFlickable
                 objectName: "previewFlickable"
@@ -123,14 +133,57 @@ Rectangle {
                 anchors.margins: 12
                 clip: true
                 interactive: !cropOverlay.dragging
+                boundsBehavior: Flickable.StopAtBounds
                 visible: viewModel ? viewModel.hasPreview : false
                 contentWidth: Math.max(width, previewCanvasImage.width)
                 contentHeight: Math.max(height, previewCanvasImage.height)
 
+                ScrollBar.vertical: ScrollBar {
+                    id: previewVScrollBar
+                    objectName: "previewVerticalScrollBar"
+                    policy: previewFlickable.contentHeight > previewFlickable.height + 1
+                            ? ScrollBar.AlwaysOn
+                            : ScrollBar.AsNeeded
+                }
+
+                ScrollBar.horizontal: ScrollBar {
+                    id: previewHScrollBar
+                    objectName: "previewHorizontalScrollBar"
+                    policy: previewFlickable.contentWidth > previewFlickable.width + 1
+                            ? ScrollBar.AlwaysOn
+                            : ScrollBar.AsNeeded
+                }
+
+                WheelHandler {
+                    id: previewWheelHandler
+                    objectName: "previewWheelHandler"
+                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                    property real wheelAccum: 0
+                    onWheel: function(event) {
+                        if (!viewModel || !viewModel.hasPreview) {
+                            return
+                        }
+                        var delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.pixelDelta.y
+                        if (delta === 0) {
+                            return
+                        }
+                        wheelAccum += delta
+                        if (wheelAccum >= 60) {
+                            viewModel.zoomInPreview()
+                            wheelAccum = 0
+                        } else if (wheelAccum <= -60) {
+                            viewModel.zoomOutPreview()
+                            wheelAccum = 0
+                        }
+                        event.accepted = true
+                    }
+                }
+
                 Image {
                     id: previewCanvasImage
                     objectName: "previewCanvasImage"
-                    anchors.centerIn: parent
+                    x: Math.max(0, (previewFlickable.contentWidth - width) * 0.5)
+                    y: Math.max(0, (previewFlickable.contentHeight - height) * 0.5)
                     width: previewFlickable.width * (viewModel ? viewModel.previewZoom : 1.0)
                     height: previewFlickable.height * (viewModel ? viewModel.previewZoom : 1.0)
                     fillMode: Image.PreserveAspectFit
@@ -200,17 +253,24 @@ Rectangle {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: 8
 
                     Label {
                         text: "切り出し・角度補正・自動回転プレビュー (" + (viewModel ? viewModel.cropCount : 0) + "件)"
                         font.pixelSize: 12
                         font.bold: true
                         color: "#374151"
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
                     }
 
-                    Item { Layout.fillWidth: true }
-
                     Label {
+                        id: cropStripHintLabel
+                        objectName: "cropStripHintLabel"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        horizontalAlignment: Text.AlignRight
+                        elide: Text.ElideRight
                         text: "各カードをクリックして選択・90°回転や余白を微調整できます"
                         font.pixelSize: 11
                         color: "#6B7280"

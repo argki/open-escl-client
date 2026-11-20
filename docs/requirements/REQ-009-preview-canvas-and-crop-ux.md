@@ -1,6 +1,6 @@
 # REQ-009: プレビューキャンバスの操作性向上・切り出し拡大表示と検出枠ドラッグ修正
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-003`](./REQ-003-fast-preview-scan.md), [`REQ-005`](./REQ-005-multi-crop-and-rotation-correction.md)
@@ -49,7 +49,7 @@ feature/preview-canvas-and-crop-ux
 
 ### タスク 1: プレビュー領域の右はみ出し修正とマウスホイール拡大縮小・スクロールバー実装
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/ui/qml/PreviewArea.qml` のヘッダー `RowLayout` と下部サムネイルヘッダーにおいて、`Label` に `Layout.fillWidth: true` / `Layout.minimumWidth: 0` / `elide: Text.ElideRight` を設定し、右側のズームコントロールや文言がウィンドウ外へ押し出されないよう修正する（必要に応じて `Main.qml` の初期サイズ・レイアウトも確認）
   - `PreviewArea.qml` の `previewFlickable` に `ScrollBar.vertical` / `ScrollBar.horizontal` を追加し、`WheelHandler`（または `MouseArea.onWheel`）でマウスホイール上下に応じた `zoomInPreview()` / `zoomOutPreview()`（および連続ズームステップ）を実装する
