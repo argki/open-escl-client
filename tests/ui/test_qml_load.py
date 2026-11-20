@@ -1635,6 +1635,105 @@ def test_sidebar_collapsible_sections_default_toggle_width_and_persistence(
     engine2.deleteLater()
 
 
+def test_expanded_save_formats_ui_bindings_and_export(tmp_path: Path) -> None:
+    """Expanded export formats drive QML quality/multipage UI and export real files."""
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    buf = BytesIO()
+    Image.new("RGB", (320, 440), color=(235, 238, 242)).save(buf, format="JPEG", quality=92)
+    scan_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=scan_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    save_dir = tmp_path / "exports"
+    vm = AppViewModel(
+        config_store=UserConfigStore(tmp_path / "cfg.json"),
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.saveDirectory = str(save_dir)
+    vm.autoCropEnabled = False
+    assert vm.saveFormats == ["PDF", "JPEG", "PNG", "TIFF", "WebP", "BMP", "GIF"]
+
+    engine, _ = create_qml_engine(vm)
+    QCoreApplication.processEvents()
+    root = engine.rootObjects()[0]
+    quality_slider = root.findChild(QObject, "jpegQualitySlider")
+    multipage_cb = root.findChild(QObject, "multipagePdfCheckBox")
+    finalize_btn = root.findChild(QObject, "finalizePdfButton")
+    assert quality_slider is not None
+    assert multipage_cb is not None
+    assert finalize_btn is not None
+
+    # Check UI bindings across formats
+    vm.selectedSaveFormat = "WebP"
+    QCoreApplication.processEvents()
+    assert vm.supportsQuality is True
+    assert vm.supportsMultipage is False
+    assert vm.nextFilenamePreview.endswith(".webp")
+    assert bool(quality_slider.property("visible")) is True
+    assert bool(multipage_cb.property("visible")) is False
+    vm.requestScanAndSave()
+    QCoreApplication.processEvents()
+
+    for fmt, ext in (("BMP", ".bmp"), ("GIF", ".gif")):
+        vm.selectedSaveFormat = fmt
+        QCoreApplication.processEvents()
+        assert vm.supportsQuality is False
+        assert vm.supportsMultipage is False
+        assert vm.nextFilenamePreview.endswith(ext)
+        assert bool(quality_slider.property("visible")) is False
+        assert bool(multipage_cb.property("visible")) is False
+        vm.requestScanAndSave()
+        QCoreApplication.processEvents()
+
+    # Multi-page TIFF workflow
+    vm.selectedSaveFormat = "TIFF"
+    vm.multipagePdf = True
+    QCoreApplication.processEvents()
+    assert vm.supportsQuality is False
+    assert vm.supportsMultipage is True
+    assert vm.nextFilenamePreview.endswith(".tif")
+    assert bool(quality_slider.property("visible")) is False
+    assert bool(multipage_cb.property("visible")) is True
+
+    vm.requestScanAndSave()
+    vm.requestScanAndSave()
+    QCoreApplication.processEvents()
+    assert vm.pendingPdfPageCount == 2
+    assert "TIFF" in str(finalize_btn.property("text"))
+
+    vm.finalizeMultipagePdf()
+    QCoreApplication.processEvents()
+    assert vm.pendingPdfPageCount == 0
+
+    exported_tifs = sorted(save_dir.glob("*.tif"))
+    assert len(exported_tifs) == 1
+    with Image.open(exported_tifs[0]) as tif_img:
+        assert tif_img.format == "TIFF"
+        assert getattr(tif_img, "n_frames", 1) == 2
+
+    assert len(list(save_dir.glob("*.webp"))) == 1
+    assert len(list(save_dir.glob("*.bmp"))) == 1
+    assert len(list(save_dir.glob("*.gif"))) == 1
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+
 
 
 

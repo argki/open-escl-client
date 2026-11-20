@@ -14,6 +14,7 @@ import numpy as np
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 
 from open_escl_client.config.user_config import (
+    VALID_SAVE_FORMATS,
     UserConfig,
     UserConfigStore,
     normalize_save_format,
@@ -268,7 +269,7 @@ class AppViewModel(QObject):
             self._preview_dpi_choices, preferred_dpi=loaded_cfg.preview_dpi
         )
 
-        self._save_formats: list[str] = ["PDF", "JPEG", "PNG"]
+        self._save_formats: list[str] = list(VALID_SAVE_FORMATS)
         self._selected_save_format: str = normalize_save_format(loaded_cfg.save_format)
         self._save_directory: str = loaded_cfg.save_directory
         self._naming_rule: str = loaded_cfg.naming_rule
@@ -498,6 +499,16 @@ class AppViewModel(QObject):
             self.saveFormatChanged.emit()
             self._refresh_next_filename_preview()
             self._persist_config()
+
+    @Property(bool, notify=saveFormatChanged)
+    def supportsQuality(self) -> bool:
+        """Return True when the active save format uses quality/compression settings."""
+        return self._selected_save_format in ("PDF", "JPEG", "PNG", "WebP")
+
+    @Property(bool, notify=saveFormatChanged)
+    def supportsMultipage(self) -> bool:
+        """Return True when the active save format supports multi-page file output."""
+        return self._selected_save_format in ("PDF", "TIFF")
 
     @Property(str, notify=saveDirectoryChanged)
     def saveDirectory(self) -> str:
@@ -1953,8 +1964,14 @@ class AppViewModel(QObject):
                     f"保存完了 ({self._saved_file_count}件目{rot_note}): {last_path} — 次の原稿を置いて続けてスキャンできます"
                 )
         else:
+            fmt_label = (
+                self._continuous_session.profile.file_format
+                if self._continuous_session is not None
+                else self._selected_save_format
+            )
             self.set_status_message(
-                f"マルチページPDFに {self._pending_pdf_page_count} ページ目を追加しました{rot_note}（続けてスキャン、または「PDFを保存して完了」）"
+                f"マルチページ{fmt_label}に {self._pending_pdf_page_count} ページ目を追加しました{rot_note}"
+                f"（続けてスキャン、または「{fmt_label}を保存して完了」）"
             )
         self.scanSaveChanged.emit()
         self._refresh_next_filename_preview()
@@ -2024,7 +2041,8 @@ class AppViewModel(QObject):
             self.scanSaveChanged.emit()
             self._refresh_next_filename_preview()
             self.set_status_message(
-                f"マルチページPDF保存完了 ({exported.page_count}ページ): {exported.output_path}"
+                f"マルチページ{exported.file_format}保存完了 ({exported.page_count}ページ): "
+                f"{exported.output_path}"
             )
         except Exception as exc:
-            self.set_status_message(f"マルチページPDF保存エラー: {exc}")
+            self.set_status_message(f"マルチページ保存エラー: {exc}")

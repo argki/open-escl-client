@@ -141,3 +141,12 @@ def test_user_config_store_handles_corrupt_json_and_clamps_values(tmp_path: Path
     assert legacy.naming_rule == "Scan_{date}_{time}_{seq:03d}"
     assert legacy.bleed_through_enabled is True
     assert legacy.bleed_through_whiten_background is True
+
+    # Expanded formats normalize cleanly across case and extension aliases
+    assert normalize_save_format(".tif") == "TIFF"
+    assert normalize_save_format("tiff") == "TIFF"
+    assert normalize_save_format("webp") == "WebP"
+    assert normalize_save_format("BMP") == "BMP"
+    assert normalize_save_format(".gif") == "GIF"
+    assert UserConfig.from_dict({"save_format": "webp"}).save_format == "WebP"
+    assert UserConfig.from_dict({"save_format": "tif"}).save_format == "TIFF"

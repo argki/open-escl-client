@@ -51,7 +51,7 @@ class MultiCropPipelineConfig:
     detection_sensitivity: int = 0
     margin_mm: float = 0.0
     target_dpi: float = 300.0
-    output_format: Literal["PNG", "JPEG"] = "PNG"
+    output_format: Literal["PNG", "JPEG", "TIFF", "WebP", "BMP", "GIF"] = "PNG"
     output_quality: int = 95
     bleed_through: BleedThroughConfig = field(default_factory=BleedThroughConfig)
 

@@ -10,7 +10,18 @@ from pathlib import Path
 
 APP_DIR_NAME = "open-escl-client"
 DEFAULT_NAMING_RULE = "Scan_{date}_{time}_{seq:03d}"
-VALID_SAVE_FORMATS: tuple[str, ...] = ("PDF", "JPEG", "PNG")
+VALID_SAVE_FORMATS: tuple[str, ...] = ("PDF", "JPEG", "PNG", "TIFF", "WebP", "BMP", "GIF")
+_SAVE_FORMAT_ALIASES: dict[str, str] = {
+    "PDF": "PDF",
+    "JPEG": "JPEG",
+    "JPG": "JPEG",
+    "PNG": "PNG",
+    "TIFF": "TIFF",
+    "TIF": "TIFF",
+    "WEBP": "WebP",
+    "BMP": "BMP",
+    "GIF": "GIF",
+}
 VALID_DETECTION_PRESETS: tuple[str, ...] = (
     "auto",
     "receipt_multi",
@@ -51,13 +62,9 @@ def default_scan_save_dir() -> Path:
 
 
 def normalize_save_format(fmt: str) -> str:
-    """Normalize a save format string to one of `PDF`, `JPEG`, `PNG`."""
-    upper = fmt.strip().upper()
-    if upper == "JPG":
-        return "JPEG"
-    if upper in VALID_SAVE_FORMATS:
-        return upper
-    return "PDF"
+    """Normalize a save format or extension string to one of `VALID_SAVE_FORMATS`."""
+    upper = str(fmt or "").strip().lstrip(".").upper()
+    return _SAVE_FORMAT_ALIASES.get(upper, "PDF")
 
 
 def _normalize_choice(raw: object, valid: tuple[str, ...], default: str) -> str:

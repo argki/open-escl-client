@@ -97,3 +97,73 @@ def test_export_pages_empty_raises(tmp_path: Path) -> None:
     exporter = ImageExporter()
     with pytest.raises(ValueError, match="空"):
         exporter.export_pages([], tmp_path / "empty.pdf")
+
+
+def test_export_tiff_single_and_multipage_with_lzw_and_dpi(tmp_path: Path) -> None:
+    exporter = ImageExporter()
+    page1 = _make_textured_image(300, 420, seed=10)
+    page2 = _make_textured_image(300, 420, seed=20)
+
+    tiff_path = tmp_path / "archive.tif"
+    res = exporter.export_pages(
+        [page1, page2],
+        tiff_path,
+        ExportOptions(file_format="TIFF", dpi=400, quality=85),
+    )
+    assert res.file_format == "TIFF"
+    assert res.page_count == 2
+    assert tiff_path.is_file()
+
+    with Image.open(tiff_path) as loaded:
+        assert loaded.format == "TIFF"
+        assert getattr(loaded, "n_frames", 1) == 2
+        assert loaded.info.get("compression") == "tiff_lzw"
+        dpi_x, dpi_y = loaded.info["dpi"]
+        assert pytest.approx(dpi_x, abs=1.0) == 400.0
+        assert pytest.approx(dpi_y, abs=1.0) == 400.0
+
+
+def test_export_webp_bmp_gif_formats_and_encode_image_bytes(tmp_path: Path) -> None:
+    from open_escl_client.imaging.multi_crop import encode_image_bytes
+
+    exporter = ImageExporter()
+    img = _make_textured_image(320, 400, seed=7)
+    rgba_img = img.convert("RGBA")
+
+    webp_high = tmp_path / "high.webp"
+    webp_low = tmp_path / "low.webp"
+    res_hi = exporter.export_single(
+        rgba_img, webp_high, ExportOptions(file_format="WebP", dpi=300, quality=95)
+    )
+    res_lo = exporter.export_single(
+        rgba_img, webp_low, ExportOptions(file_format="WebP", dpi=300, quality=30)
+    )
+    assert res_hi.file_format == "WebP"
+    assert res_lo.size_bytes < res_hi.size_bytes
+    with Image.open(webp_high) as loaded_webp:
+        assert loaded_webp.format == "WEBP"
+        exif = loaded_webp.getexif()
+        assert pytest.approx(float(exif[0x011A]), abs=1.0) == 300.0
+
+    bmp_path = tmp_path / "out.bmp"
+    res_bmp = exporter.export_single(
+        rgba_img, bmp_path, ExportOptions(file_format="BMP", dpi=300, quality=90)
+    )
+    assert res_bmp.file_format == "BMP"
+    with Image.open(bmp_path) as loaded_bmp:
+        assert loaded_bmp.format == "BMP"
+        assert pytest.approx(loaded_bmp.info["dpi"][0], abs=1.0) == 300.0
+
+    gif_path = tmp_path / "out.gif"
+    res_gif = exporter.export_single(
+        rgba_img, gif_path, ExportOptions(file_format="GIF", dpi=150, quality=80)
+    )
+    assert res_gif.file_format == "GIF"
+    with Image.open(gif_path) as loaded_gif:
+        assert loaded_gif.format == "GIF"
+        assert loaded_gif.mode == "P"
+
+    bgr = np.array(img)[:, :, ::-1]
+    for fmt in ("PNG", "JPEG", "TIFF", "WebP", "BMP", "GIF"):
+        encoded = encode_image_bytes(bgr, fmt=fmt, quality=85)
+        assert len(encoded) > 50

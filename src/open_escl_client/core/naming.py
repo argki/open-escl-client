@@ -15,6 +15,11 @@ _FORMAT_TO_EXTENSION: dict[str, str] = {
     "JPEG": ".jpg",
     "JPG": ".jpg",
     "PNG": ".png",
+    "TIFF": ".tif",
+    "TIF": ".tif",
+    "WEBP": ".webp",
+    "BMP": ".bmp",
+    "GIF": ".gif",
 }
 
 
