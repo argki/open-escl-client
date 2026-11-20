@@ -846,5 +846,23 @@ def test_viewmodel_bleed_through_preview_updates_immediately_without_rescan(
     assert vm.previewImageUrl != url_after_strength
     assert mock_client.scan_single_page.call_count == 1
 
+    # Verify BleedThroughPanel QML components load and stay within sidebar width bounds.
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+    bleed_panel = root.findChild(QObject, "bleedThroughPanel")
+    save_panel = root.findChild(QObject, "saveSettingsPanel")
+    bleed_cb = root.findChild(QObject, "bleedThroughCheckBox")
+    bleed_slider = root.findChild(QObject, "bleedThroughStrengthSlider")
+    bleed_whiten_cb = root.findChild(QObject, "bleedThroughWhitenCheckBox")
+    assert bleed_panel is not None and save_panel is not None
+    assert bleed_cb is not None and bleed_slider is not None and bleed_whiten_cb is not None
+    assert bleed_cb.property("checked") is True
+    assert int(bleed_slider.property("value")) == 90
+    assert bleed_whiten_cb.property("checked") is True
+    assert float(bleed_panel.property("width")) <= float(save_panel.property("width")) + 1.0
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
 
 
