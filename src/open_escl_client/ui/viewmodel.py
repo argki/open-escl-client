@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 import threading
+from typing import Literal
 from urllib.parse import urlparse
 
 import cv2
@@ -274,6 +275,9 @@ class AppViewModel(QObject):
         self._preview_session: PreviewSession | None = None
         self._preview_bgr: np.ndarray | None = None
         self._preview_image_url: str = ""
+        self._full_preview_thumbnail_url: str = ""
+        self._inspect_preview_url: str = ""
+        self._active_preview_mode: Literal["full", "crop"] = "full"
         self._preview_zoom: float = 1.0
 
         self._auto_crop_enabled: bool = loaded_cfg.auto_crop_enabled
@@ -564,8 +568,27 @@ class AppViewModel(QObject):
     def hasPreview(self) -> bool:
         return self._preview_session is not None and bool(self._preview_image_url)
 
+    @Property(bool, notify=previewChanged)
+    def isInspectingCrop(self) -> bool:
+        return (
+            self._active_preview_mode == "crop"
+            and self._preview_session is not None
+            and bool(self._inspect_preview_url)
+            and 0 <= self._selected_crop_index < len(self._crop_boxes)
+        )
+
+    @Property(str, notify=previewChanged)
+    def activePreviewMode(self) -> str:
+        return "crop" if self.isInspectingCrop else "full"
+
+    @Property(str, notify=previewChanged)
+    def fullPreviewThumbnailUrl(self) -> str:
+        return self._full_preview_thumbnail_url
+
     @Property(str, notify=previewChanged)
     def previewImageUrl(self) -> str:
+        if self.isInspectingCrop:
+            return self._inspect_preview_url
         return self._preview_image_url
 
     @Property(int, notify=previewChanged)
@@ -599,12 +622,16 @@ class AppViewModel(QObject):
 
     @Property(int, notify=previewChanged)
     def previewImageWidth(self) -> int:
+        if self.isInspectingCrop:
+            return int(self._image_provider.inspect_image.width())
         if self._preview_session is not None:
             return int(self._preview_session.image_width_px)
         return 0
 
     @Property(int, notify=previewChanged)
     def previewImageHeight(self) -> int:
+        if self.isInspectingCrop:
+            return int(self._image_provider.inspect_image.height())
         if self._preview_session is not None:
             return int(self._preview_session.image_height_px)
         return 0
@@ -910,12 +937,17 @@ class AppViewModel(QObject):
         return list(self._crop_boxes)
 
     def _clear_crop_boxes(self) -> None:
+        was_inspecting = self._active_preview_mode == "crop"
         self._crop_boxes = []
         self._crop_sensitivities = []
         self._crop_aspect_ratios = []
         self._crop_thumbnail_urls = {}
         self._selected_crop_index = -1
+        self._active_preview_mode = "full"
+        self._inspect_preview_url = ""
         self._image_provider.clear_crop_thumbnails()
+        if was_inspecting:
+            self.previewChanged.emit()
         self.cropBoxesChanged.emit()
 
     def _current_bleed_through_config(self) -> BleedThroughConfig:
@@ -938,13 +970,18 @@ class AppViewModel(QObject):
         if self._bleed_through_enabled:
             filtered = self._maybe_apply_bleed_through(self._preview_bgr)
             url = self._image_provider.update_image_bgr(filtered)
+            full_thumb_bytes = self._render_thumbnail_bytes(filtered)
         else:
             url = self._image_provider.update_image_bytes(self._preview_session.image_bytes)
+            full_thumb_bytes = self._render_thumbnail_bytes(self._preview_bgr)
         self._preview_image_url = url
-        self.previewChanged.emit()
+        self._full_preview_thumbnail_url = self._image_provider.set_full_thumbnail_bytes(
+            full_thumb_bytes
+        )
         if self._crop_boxes:
             self._rebuild_all_crop_thumbnails()
             self.cropBoxesChanged.emit()
+        self.previewChanged.emit()
 
     def _render_thumbnail_bytes(self, bgr: np.ndarray, max_side: int = 320) -> bytes:
         h, w = bgr.shape[:2]
@@ -960,11 +997,11 @@ class AppViewModel(QObject):
             thumb = bgr
         return encode_image_bytes(thumb, fmt="JPEG", quality=85)
 
-    def _rebuild_crop_thumbnail(self, list_index: int) -> None:
+    def _render_crop_bgr(self, list_index: int) -> np.ndarray | None:
         if self._preview_bgr is None or self._preview_session is None:
-            return
+            return None
         if not (0 <= list_index < len(self._crop_boxes)):
-            return
+            return None
         box = self._crop_boxes[list_index]
         dpi = float(self._preview_session.preview_dpi)
         cropped = self._deskew_processor.crop_box(
@@ -974,9 +1011,19 @@ class AppViewModel(QObject):
             dpi=dpi,
         )
         rotated = rotate_image_cw(cropped.image, box.effective_rotation_cw_deg)
-        thumb_bytes = self._render_thumbnail_bytes(self._maybe_apply_bleed_through(rotated))
+        return self._maybe_apply_bleed_through(rotated)
+
+    def _rebuild_crop_thumbnail(self, list_index: int) -> None:
+        rendered = self._render_crop_bgr(list_index)
+        if rendered is None:
+            return
+        box = self._crop_boxes[list_index]
+        thumb_bytes = self._render_thumbnail_bytes(rendered)
         url = self._image_provider.set_crop_thumbnail(box.index, thumb_bytes)
         self._crop_thumbnail_urls[box.index] = url
+        if self._active_preview_mode == "crop" and list_index == self._selected_crop_index:
+            self._inspect_preview_url = self._image_provider.set_inspect_image_bgr(rendered)
+            self.previewChanged.emit()
 
     def _rebuild_all_crop_thumbnails(self) -> None:
         self._image_provider.clear_crop_thumbnails()
@@ -1035,11 +1082,16 @@ class AppViewModel(QObject):
             url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
             self._crop_thumbnail_urls[refined_box.index] = url
 
+        was_inspecting = self._active_preview_mode == "crop"
         self._crop_boxes = analyzed
         self._crop_sensitivities = [self._detection_sensitivity] * len(analyzed)
         self._crop_aspect_ratios = [self._aspect_ratio_preset] * len(analyzed)
         self._selected_crop_index = 0 if analyzed else -1
+        self._active_preview_mode = "full"
+        self._inspect_preview_url = ""
         self._preview_boxes_ready_for_save = bool(analyzed)
+        if was_inspecting:
+            self.previewChanged.emit()
         self.cropBoxesChanged.emit()
 
     def _redetect_single_crop_at(
@@ -1123,11 +1175,13 @@ class AppViewModel(QObject):
                 refined_box = refined_box.with_auto_rotation(0)
 
             self._crop_boxes[list_index] = refined_box
-            thumb_bytes = self._render_thumbnail_bytes(
-                self._maybe_apply_bleed_through(final_img)
-            )
+            rendered = self._maybe_apply_bleed_through(final_img)
+            thumb_bytes = self._render_thumbnail_bytes(rendered)
             url = self._image_provider.set_crop_thumbnail(refined_box.index, thumb_bytes)
             self._crop_thumbnail_urls[refined_box.index] = url
+            if self._active_preview_mode == "crop" and list_index == self._selected_crop_index:
+                self._inspect_preview_url = self._image_provider.set_inspect_image_bgr(rendered)
+                self.previewChanged.emit()
 
         self._preview_boxes_ready_for_save = bool(self._crop_boxes)
         self.cropBoxesChanged.emit()
@@ -1138,6 +1192,38 @@ class AppViewModel(QObject):
             if self._selected_crop_index != list_index:
                 self._selected_crop_index = list_index
                 self.cropBoxesChanged.emit()
+
+    @Slot()
+    def showFullPreview(self) -> None:
+        """Switch main preview canvas back to full platen overview mode."""
+        if self._active_preview_mode == "full":
+            return
+        self._active_preview_mode = "full"
+        self._preview_zoom = 1.0
+        self.previewZoomChanged.emit()
+        self.previewChanged.emit()
+
+    @Slot(int)
+    def inspectCropPreview(self, list_index: int) -> None:
+        """Select crop box `list_index` and inspect its cropped/rotated result in main canvas."""
+        if not (0 <= list_index < len(self._crop_boxes)):
+            return
+        selection_changed = self._selected_crop_index != list_index
+        self._selected_crop_index = list_index
+        rendered = self._render_crop_bgr(list_index)
+        if rendered is None:
+            if selection_changed:
+                self.cropBoxesChanged.emit()
+            return
+        self._inspect_preview_url = self._image_provider.set_inspect_image_bgr(rendered)
+        mode_changed = self._active_preview_mode != "crop"
+        self._active_preview_mode = "crop"
+        if mode_changed or selection_changed:
+            self._preview_zoom = 1.0
+            self.previewZoomChanged.emit()
+        self.previewChanged.emit()
+        if selection_changed:
+            self.cropBoxesChanged.emit()
 
     @Slot()
     def redetectCropBoxes(self) -> None:
@@ -1466,12 +1552,23 @@ class AppViewModel(QObject):
         try:
             self._preview_session = session_obj
             self._preview_bgr = decode_image_bytes(session_obj.image_bytes)
+            self._active_preview_mode = "full"
+            self._inspect_preview_url = ""
             if self._bleed_through_enabled and self._preview_bgr is not None:
                 filtered = self._maybe_apply_bleed_through(self._preview_bgr)
                 url = self._image_provider.update_image_bgr(filtered)
+                full_thumb_bytes = self._render_thumbnail_bytes(filtered)
             else:
                 url = self._image_provider.update_image_bytes(session_obj.image_bytes)
+                full_thumb_bytes = (
+                    self._render_thumbnail_bytes(self._preview_bgr)
+                    if self._preview_bgr is not None
+                    else session_obj.image_bytes
+                )
             self._preview_image_url = url
+            self._full_preview_thumbnail_url = self._image_provider.set_full_thumbnail_bytes(
+                full_thumb_bytes
+            )
             self._preview_zoom = 1.0
             self.previewZoomChanged.emit()
             self.previewChanged.emit()

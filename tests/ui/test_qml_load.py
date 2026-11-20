@@ -1069,6 +1069,88 @@ def test_preview_area_fits_within_window_and_provides_wheel_zoom_and_scrollbars(
     engine.deleteLater()
 
 
+def test_crop_card_click_inspects_document_and_full_card_returns_to_overview() -> None:
+    """Clicking a crop card switches upper canvas to cropped result; fullOverviewCard restores."""
+    import numpy as np
+    from PySide6.QtCore import QCoreApplication
+
+    _ensure_qapp()
+    arr = np.full((600, 800, 3), 30, dtype=np.uint8)
+    arr[100:500, 150:450] = 245
+    buf = BytesIO()
+    Image.fromarray(arr).save(buf, format="JPEG")
+    preview_bytes = buf.getvalue()
+
+    caps = parse_scanner_capabilities_xml(BROTHER_CAPABILITIES_XML)
+    mock_fetcher = MagicMock(return_value=caps)
+    mock_client = MagicMock()
+    mock_client.scan_single_page.side_effect = lambda req: EsclScanResult(
+        image_bytes=preview_bytes,
+        content_type="image/jpeg",
+        job_url="http://192.168.1.50:80/eSCL/ScanJobs/1",
+        request=req,
+    )
+
+    vm = AppViewModel(
+        capabilities_fetcher=mock_fetcher,
+        scan_client_factory=lambda _url: mock_client,
+        run_preview_async=False,
+    )
+    vm.addManualScanner("192.168.1.50")
+    vm.requestPreview()
+    assert vm.cropCount == 1
+    assert vm.isInspectingCrop is False
+    assert vm.activePreviewMode == "full"
+    assert vm.fullPreviewThumbnailUrl.startswith("image://preview/full_thumb/")
+    full_url = vm.previewImageUrl
+    assert vm.previewImageWidth == 800
+    assert vm.previewImageHeight == 600
+
+    engine, _ = create_qml_engine(vm)
+    root = engine.rootObjects()[0]
+    full_card = root.findChild(QObject, "fullOverviewCard")
+    crop_overlay = root.findChild(QObject, "cropOverlay")
+    title_label = root.findChild(QObject, "previewTitleLabel")
+    assert full_card is not None
+    assert crop_overlay is not None
+    assert title_label is not None
+    assert bool(crop_overlay.property("visible")) is True
+
+    # Inspect cropped document
+    vm.inspectCropPreview(0)
+    QCoreApplication.processEvents()
+    assert vm.isInspectingCrop is True
+    assert vm.activePreviewMode == "crop"
+    assert vm.previewImageUrl.startswith("image://preview/inspect/")
+    assert 0 < vm.previewImageWidth < 800
+    assert 0 < vm.previewImageHeight < 600
+    assert bool(crop_overlay.property("visible")) is False
+    assert "切り出し結果 #1" in str(title_label.property("text"))
+
+    # Live rotation while inspecting refreshes inspect URL
+    prev_inspect_url = vm.previewImageUrl
+    vm.rotateCropBox(0, 90)
+    QCoreApplication.processEvents()
+    assert vm.isInspectingCrop is True
+    assert vm.previewImageUrl != prev_inspect_url
+    assert vm.previewImageUrl.startswith("image://preview/inspect/")
+
+    # Return to full overview
+    vm.showFullPreview()
+    QCoreApplication.processEvents()
+    assert vm.isInspectingCrop is False
+    assert vm.activePreviewMode == "full"
+    assert vm.previewImageUrl == full_url
+    assert vm.previewImageWidth == 800
+    assert vm.previewImageHeight == 600
+    assert bool(crop_overlay.property("visible")) is True
+
+    for obj in engine.rootObjects():
+        obj.deleteLater()
+    engine.deleteLater()
+
+
+
 
 
 

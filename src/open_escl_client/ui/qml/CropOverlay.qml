@@ -12,7 +12,7 @@ Item {
     property var cropBoxes: viewModel ? viewModel.cropBoxes : []
     property bool dragging: false
 
-    visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled && viewModel.cropCount > 0) : false
+    visible: viewModel ? (viewModel.hasPreview && viewModel.autoCropEnabled && viewModel.cropCount > 0 && !viewModel.isInspectingCrop) : false
 
     onCropBoxesChanged: overlayCanvas.requestPaint()
     onWidthChanged: overlayCanvas.requestPaint()

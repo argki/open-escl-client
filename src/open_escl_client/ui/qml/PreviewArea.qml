@@ -29,7 +29,11 @@ Rectangle {
             spacing: 8
 
             Label {
-                text: "プレビューキャンバス（色合い・自動トリミング確認）"
+                id: previewTitleLabel
+                objectName: "previewTitleLabel"
+                text: (viewModel && viewModel.isInspectingCrop)
+                    ? ("切り出し結果 #" + (viewModel.selectedCropIndex + 1) + " プレビュー")
+                    : "プレビューキャンバス（色合い・自動トリミング確認）"
                 font.pixelSize: 14
                 font.bold: true
                 color: "#1F2937"
@@ -271,37 +275,33 @@ Rectangle {
                         Layout.minimumWidth: 0
                         horizontalAlignment: Text.AlignRight
                         elide: Text.ElideRight
-                        text: "各カードをクリックして選択・90°回転や余白を微調整できます"
+                        text: "全体像またはカードをクリックして上部キャンバスで拡大確認できます"
                         font.pixelSize: 11
                         color: "#6B7280"
                     }
                 }
 
-                ListView {
-                    id: cropThumbnailList
-                    objectName: "cropThumbnailList"
+                RowLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    orientation: ListView.Horizontal
                     spacing: 10
-                    clip: true
-                    model: viewModel ? viewModel.cropBoxes : []
 
-                    delegate: Rectangle {
-                        id: thumbCard
-                        width: 128
-                        height: cropThumbnailList.height
+                    Rectangle {
+                        id: fullOverviewCard
+                        objectName: "fullOverviewCard"
+                        Layout.preferredWidth: 112
+                        Layout.fillHeight: true
                         radius: 5
-                        color: modelData.selected ? "#EFF6FF" : "#FFFFFF"
-                        border.color: modelData.selected ? "#2563EB" : "#D1D5DB"
-                        border.width: modelData.selected ? 2 : 1
+                        color: !(viewModel && viewModel.isInspectingCrop) ? "#EFF6FF" : "#FFFFFF"
+                        border.color: !(viewModel && viewModel.isInspectingCrop) ? "#2563EB" : "#D1D5DB"
+                        border.width: !(viewModel && viewModel.isInspectingCrop) ? 2 : 1
 
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 if (viewModel) {
-                                    viewModel.selectCropBox(modelData.listIndex)
+                                    viewModel.showFullPreview()
                                 }
                             }
                         }
@@ -316,21 +316,109 @@ Rectangle {
                                 spacing: 4
 
                                 Label {
-                                    text: "#" + modelData.index
+                                    text: "全体像"
                                     font.pixelSize: 11
                                     font.bold: true
-                                    color: modelData.selected ? "#1D4ED8" : "#059669"
+                                    color: !(viewModel && viewModel.isInspectingCrop) ? "#1D4ED8" : "#374151"
                                 }
 
                                 Item { Layout.fillWidth: true }
 
                                 Label {
-                                    text: modelData.effectiveRotationDeg + "°"
-                                    font.pixelSize: 10
+                                    visible: !(viewModel && viewModel.isInspectingCrop)
+                                    text: "表示中"
+                                    font.pixelSize: 9
                                     font.bold: true
-                                    color: "#4B5563"
+                                    color: "#2563EB"
                                 }
                             }
+
+                            Image {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                fillMode: Image.PreserveAspectFit
+                                smooth: true
+                                mipmap: true
+                                cache: false
+                                asynchronous: false
+                                source: viewModel ? viewModel.fullPreviewThumbnailUrl : ""
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "原稿台・枠編集"
+                                font.pixelSize: 10
+                                color: "#6B7280"
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+
+                    ListView {
+                        id: cropThumbnailList
+                        objectName: "cropThumbnailList"
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        orientation: ListView.Horizontal
+                        spacing: 10
+                        clip: true
+                        model: viewModel ? viewModel.cropBoxes : []
+
+                        delegate: Rectangle {
+                            id: thumbCard
+                            width: 128
+                            height: cropThumbnailList.height
+                            radius: 5
+                            color: modelData.selected ? "#EFF6FF" : "#FFFFFF"
+                            border.color: (modelData.selected && viewModel && viewModel.isInspectingCrop)
+                                ? "#2563EB"
+                                : (modelData.selected ? "#10B981" : "#D1D5DB")
+                            border.width: modelData.selected ? 2 : 1
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (viewModel) {
+                                        viewModel.inspectCropPreview(modelData.listIndex)
+                                    }
+                                }
+                            }
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 5
+                                spacing: 3
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+
+                                    Label {
+                                        text: "#" + modelData.index
+                                        font.pixelSize: 11
+                                        font.bold: true
+                                        color: modelData.selected ? "#1D4ED8" : "#059669"
+                                    }
+
+                                    Label {
+                                        visible: modelData.selected && viewModel && viewModel.isInspectingCrop
+                                        text: "拡大中"
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        color: "#2563EB"
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    Label {
+                                        text: modelData.effectiveRotationDeg + "°"
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                        color: "#4B5563"
+                                    }
+                                }
 
                             Image {
                                 Layout.fillWidth: true
@@ -377,6 +465,7 @@ Rectangle {
                                             viewModel.rotateCropBox(modelData.listIndex, 90)
                                         }
                                     }
+                                }
                                 }
                             }
                         }
