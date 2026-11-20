@@ -6,7 +6,7 @@ import QtQuick.Layouts
 // PreviewArea.qml: 中央のプレビュー画像・自動トリミング確認キャンバス領域
 // ----------------------------------------------------------------------------
 // 役割:
-//   - 低解像度で高速スキャンしたプレビュー画像の表示（ズーム・スクロール対応）
+//   - スキャンしたプレビュー画像の表示（ズーム・スクロール対応）
 //   - プレビュー使用DPIおよび本保存用DPIの比較サマリー表示
 //   - スキャン実行中のローディングインジケータ表示
 // ============================================================================
@@ -39,7 +39,10 @@ Rectangle {
             Label {
                 objectName: "previewSummaryLabel"
                 text: viewModel
-                      ? (viewModel.selectedPaperSize + " / プレビュー: " + viewModel.previewDpi + " dpi / 本保存: " + viewModel.selectedResolution + " dpi")
+                      ? (viewModel.selectedPaperSize
+                         + " / プレビュー: " + viewModel.previewDpi + " dpi"
+                         + (viewModel.hasPreview ? (" (" + viewModel.previewImageWidth + "×" + viewModel.previewImageHeight + ")") : "")
+                         + " / 本保存: " + viewModel.selectedResolution + " dpi")
                       : ""
                 font.pixelSize: 12
                 color: "#4B5563"
@@ -106,7 +109,7 @@ Rectangle {
 
                 Label {
                     Layout.alignment: Qt.AlignHCenter
-                    text: "下部の「高速プレビュー」を押すと、低解像度（" + (viewModel ? viewModel.selectedPreviewDpi : 100) + " dpi）で素早く読み取り結果を確認できます"
+                    text: "下部の「プレビュー」を押すと、指定した解像度（" + (viewModel ? viewModel.selectedPreviewDpi : 100) + " dpi）で読み取り結果を確認できます"
                     font.pixelSize: 13
                     color: "#9CA3AF"
                 }
@@ -131,6 +134,8 @@ Rectangle {
                     width: previewFlickable.width * (viewModel ? viewModel.previewZoom : 1.0)
                     height: previewFlickable.height * (viewModel ? viewModel.previewZoom : 1.0)
                     fillMode: Image.PreserveAspectFit
+                    smooth: true
+                    mipmap: true
                     cache: false
                     asynchronous: false
                     source: viewModel ? viewModel.previewImageUrl : ""
@@ -271,6 +276,8 @@ Rectangle {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 fillMode: Image.PreserveAspectFit
+                                smooth: true
+                                mipmap: true
                                 cache: false
                                 asynchronous: false
                                 source: modelData.thumbnailUrl || ""

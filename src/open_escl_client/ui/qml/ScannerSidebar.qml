@@ -186,7 +186,7 @@ Rectangle {
                     }
 
                     Label {
-                        text: "高速プレビュー時の解像度 (DPI)"
+                        text: "プレビュー時の解像度 (DPI)"
                         font.bold: true
                         color: "#374151"
                     }

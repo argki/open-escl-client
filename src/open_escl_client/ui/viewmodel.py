@@ -937,9 +937,7 @@ class AppViewModel(QObject):
             return
         if self._bleed_through_enabled:
             filtered = self._maybe_apply_bleed_through(self._preview_bgr)
-            url = self._image_provider.update_image_bytes(
-                encode_image_bytes(filtered, fmt="JPEG", quality=92)
-            )
+            url = self._image_provider.update_image_bgr(filtered)
         else:
             url = self._image_provider.update_image_bytes(self._preview_session.image_bytes)
         self._preview_image_url = url
@@ -1247,7 +1245,7 @@ class AppViewModel(QObject):
 
     @Slot()
     def zoomInPreview(self) -> None:
-        self._preview_zoom = min(4.0, round(self._preview_zoom + 0.25, 2))
+        self._preview_zoom = min(8.0, round(self._preview_zoom + 0.25, 2))
         self.previewZoomChanged.emit()
 
     @Slot()
@@ -1468,11 +1466,11 @@ class AppViewModel(QObject):
         try:
             self._preview_session = session_obj
             self._preview_bgr = decode_image_bytes(session_obj.image_bytes)
-            display_bytes = session_obj.image_bytes
             if self._bleed_through_enabled and self._preview_bgr is not None:
                 filtered = self._maybe_apply_bleed_through(self._preview_bgr)
-                display_bytes = encode_image_bytes(filtered, fmt="JPEG", quality=92)
-            url = self._image_provider.update_image_bytes(display_bytes)
+                url = self._image_provider.update_image_bgr(filtered)
+            else:
+                url = self._image_provider.update_image_bytes(session_obj.image_bytes)
             self._preview_image_url = url
             self._preview_zoom = 1.0
             self.previewZoomChanged.emit()
@@ -1528,7 +1526,7 @@ class AppViewModel(QObject):
         self._cancel_requested = False
         self._set_busy(True)
         self.set_status_message(
-            f"低解像度プレビュースキャン中 ({preview_dpi} dpi / {paper_opt.name} {paper_opt.orientation_label})..."
+            f"プレビュースキャン中 ({preview_dpi} dpi / {paper_opt.name} {paper_opt.orientation_label})..."
         )
 
         base_url = scanner.base_url
