@@ -77,7 +77,7 @@ feat(config): 設定永続化項目を拡張しネーミングルール既定値
 
 ### タスク 2: `AppViewModel` と `PreviewScanService` への全設定保存・復元およびプレビュー解像度指定の統合
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/core/preview_service.py` に、ユーザー指定の希望プレビュー DPI をスキャナの `supported_resolutions` と照合して決定する解決ロジックを追加する
   - `src/open_escl_client/ui/viewmodel.py` の起動時ロード・各プロパティ変更時の自動保存・`resetAllSettingsToDefaults()` スロットを実装する（接続先スキャナ能力取得後にも保存済み用紙サイズ・給紙元を優先復元する）
