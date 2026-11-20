@@ -230,14 +230,18 @@ Rectangle {
                         if (delta === 0) {
                             return
                         }
-                        var pointerX = (event && event.x !== undefined) ? event.x : point.position.x
-                        var pointerY = (event && event.y !== undefined) ? event.y : point.position.y
+                        var rawX = (event && event.x !== undefined) ? event.x : point.position.x
+                        var rawY = (event && event.y !== undefined) ? event.y : point.position.y
+                        var vpPt = previewFlickable.contentItem.mapToItem(previewFlickable, rawX, rawY)
+                        if (wheelAccum * delta < 0) {
+                            wheelAccum = 0
+                        }
                         wheelAccum += delta
                         if (wheelAccum >= 60) {
-                            previewRoot.zoomAroundViewportPoint(true, pointerX, pointerY)
+                            previewRoot.zoomAroundViewportPoint(true, vpPt.x, vpPt.y)
                             wheelAccum = 0
                         } else if (wheelAccum <= -60) {
-                            previewRoot.zoomAroundViewportPoint(false, pointerX, pointerY)
+                            previewRoot.zoomAroundViewportPoint(false, vpPt.x, vpPt.y)
                             wheelAccum = 0
                         }
                         event.accepted = true

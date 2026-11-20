@@ -1336,25 +1336,60 @@ def test_sidebar_panels_fit_within_groupbox_and_zoom_centers_on_pointer() -> Non
                 right = float(child.property("x")) + float(child.property("width"))
                 assert right <= avail + 0.5, f"{name} child overflowed at w={win_w}"
 
-    # Verify zoomAroundViewportPoint preserves target point near bottom-right instead of (0, 0)
+    # Verify real QWheelEvent preserves target point across multiple zoom-in / zoom-out steps
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
     preview_area = root.findChild(QObject, "previewArea")
     flickable = root.findChild(QObject, "previewFlickable")
     assert preview_area is not None and flickable is not None
     vw = float(flickable.property("width"))
     vh = float(flickable.property("height"))
     vx, vy = vw * 0.8, vh * 0.75
+    scene_pt = flickable.mapToScene(QPointF(vx, vy))
 
-    preview_area.zoomAroundViewportPoint(True, vx, vy)
-    QCoreApplication.processEvents()
-    assert vm.previewZoom == pytest.approx(1.25, abs=1e-6)
-    cx = float(flickable.property("contentX"))
-    cy = float(flickable.property("contentY"))
-    assert cx == pytest.approx(vw * 0.25 * 0.8, abs=1.0)
-    assert cy == pytest.approx(vh * 0.25 * 0.75, abs=1.0)
+    for expected_zoom in (1.25, 1.5, 1.75, 2.0):
+        ev = QWheelEvent(
+            scene_pt,
+            scene_pt,
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        QGuiApplication.sendEvent(root, ev)
+        QCoreApplication.processEvents()
+        assert vm.previewZoom == pytest.approx(expected_zoom, abs=1e-6)
+        cx = float(flickable.property("contentX"))
+        cy = float(flickable.property("contentY"))
+        cw = float(flickable.property("contentWidth"))
+        ch = float(flickable.property("contentHeight"))
+        assert (cx + vx) / cw == pytest.approx(0.8, abs=1e-3)
+        assert (cy + vy) / ch == pytest.approx(0.75, abs=1e-3)
 
-    preview_area.zoomAroundViewportPoint(False, vx, vy)
-    QCoreApplication.processEvents()
-    assert vm.previewZoom == pytest.approx(1.0, abs=1e-6)
+    for expected_zoom in (1.75, 1.5, 1.25, 1.0):
+        ev = QWheelEvent(
+            scene_pt,
+            scene_pt,
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+        QGuiApplication.sendEvent(root, ev)
+        QCoreApplication.processEvents()
+        assert vm.previewZoom == pytest.approx(expected_zoom, abs=1e-6)
+        cx = float(flickable.property("contentX"))
+        cy = float(flickable.property("contentY"))
+        cw = float(flickable.property("contentWidth"))
+        ch = float(flickable.property("contentHeight"))
+        assert (cx + vx) / cw == pytest.approx(0.8, abs=1e-3)
+        assert (cy + vy) / ch == pytest.approx(0.75, abs=1e-3)
+
     assert float(flickable.property("contentX")) == pytest.approx(0.0, abs=1.0)
     assert float(flickable.property("contentY")) == pytest.approx(0.0, abs=1.0)
 
