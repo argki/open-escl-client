@@ -1,6 +1,6 @@
 # REQ-008: 設定の永続化・初期化リセット・プレビュー解像度指定とデフォルト値見直し
 
-- **ステータス**: `未着手`
+- **ステータス**: `進行中`
 - **優先ターゲット**: Brother × macOS（クロスプラットフォーム・汎用eSCL拡張を考慮）
 - **元要件（原案）**: [`docs/requirements/drafts/20261120.md`](./drafts/20261120.md)
 - **依存する先行要件**: [`REQ-001`](./REQ-001-project-foundation-and-declarative-ui.md), [`REQ-003`](./REQ-003-fast-preview-scan.md), [`REQ-007`](./REQ-007-bleed-through-removal.md)
@@ -49,7 +49,7 @@ feature/config-persistence-and-defaults
 
 ### タスク 1: `UserConfig` の永続化項目拡張と既定値（`{time}`・裏写りON）の見直し
 
-- **状態**: `[ ] 未完了`
+- **状態**: `[x] 完了`
 - **実装内容**:
   - `src/open_escl_client/config/user_config.py` の `UserConfig` に給紙元・用紙サイズ・プレビュー DPI・トリミング関連設定（自動トリミング、複数分割、自動向き、検出パターン、検出感度、検出比率、余白 mm）・裏写り除去設定（有効、強度、背景白化）・ウィンドウ状態等を追加し、`to_dict` / `from_dict` / `reset_to_defaults` を実装する
   - `src/open_escl_client/core/naming.py` の `DEFAULT_NAMING_TEMPLATE` および `UserConfig.naming_rule` のデフォルト値を `Scan_{date}_{time}_{seq:03d}` に変更する

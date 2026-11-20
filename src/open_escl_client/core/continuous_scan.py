@@ -9,7 +9,7 @@ from pathlib import Path
 
 from open_escl_client.config.user_config import normalize_save_format
 from open_escl_client.core.exporter import ExportOptions, ExportResult, ImageExporter
-from open_escl_client.core.naming import FileNamingEngine
+from open_escl_client.core.naming import DEFAULT_NAMING_TEMPLATE, FileNamingEngine
 from open_escl_client.core.paper_size import PaperSizeOption
 from open_escl_client.core.preview_service import PreviewSession
 from open_escl_client.escl.capabilities import InputSourceCaps
@@ -26,7 +26,7 @@ class ScanSaveProfile:
     source_caps: InputSourceCaps
     paper_size: PaperSizeOption
     save_dir: Path
-    naming_template: str = "Scan_{date}_{seq:03d}"
+    naming_template: str = DEFAULT_NAMING_TEMPLATE
     file_format: str = "PDF"
     resolution_dpi: int = 300
     quality: int = 85
@@ -78,7 +78,7 @@ class ContinuousScanSession:
         base_url: str,
         source_caps: InputSourceCaps,
         save_dir: Path | str,
-        naming_template: str = "Scan_{date}_{seq:03d}",
+        naming_template: str = DEFAULT_NAMING_TEMPLATE,
         file_format: str = "PDF",
         resolution_dpi: int = 300,
         quality: int = 85,
